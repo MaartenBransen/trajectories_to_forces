@@ -19,47 +19,6 @@ def _nwise(iterable, n=2):
         next(islice(it, i, i), None)                                               
     return zip(*iters)
 
-def _weighted_mean_std(array,weights,axis=None,unbiased=True):
-    """
-    Calculate a weighted mean and corresponding errors of a set of samples
-    along an arbitrary axis.
-
-    Parameters
-    ----------
-    array : np.array like
-        the data to average
-    weights : list or array like
-        weighing to use in the averaging, must be same shape as array
-    axis : int, optional
-        the direction along which to average. The default is None.
-    unbiased : TYPE, optional
-        DESCRIPTION. The default is True.
-
-    Returns
-    -------
-    mean : list like
-        the averaged data
-    std : list like
-        standard deviation of the data points
-    std_of_mean : list like
-        the standard deviation of mean for the data points
-
-    See also
-    --------
-    https://en.wikipedia.org/wiki/Weighted_arithmetic_mean#Weighted_sample_variance
-    https://docs.scipy.org/doc/numpy-1.9.2/reference/generated/numpy.average.html
-    https://docs.scipy.org/doc/numpy/reference/generated/numpy.sum.html
-    
-    """
-    mean = np.sum(array*weights,axis=axis)/np.sum(weights,axis=axis)
-    if unbiased:
-        std = np.sqrt(np.sum(weights*(array-mean)**2,axis=axis)/(np.sum(weights,axis=axis)-1))
-    else:
-        std = np.sqrt(np.sum(weights*(array-mean)**2,axis=axis)/np.sum(weights,axis=axis))
-        
-    std_of_mean = std/np.sum(weights,axis=axis)**0.5
-    return mean,std,std_of_mean
-
 def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
     """calculates element-wise distances between two sets of n-dimensional 
     coordinates while wrapping around boundaries of periodic box with bounds
@@ -96,7 +55,8 @@ def _calculate_accelerations_periodic(x0,x1,x2,xmin,xmax):
         modifier += (xmax-xmin)
     return x0 - 2*x1 + x2 + modifier
 
-def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,periodic_boundary=False):
+def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,
+                                 periodic_boundary=False):
     """
     calculate forces acting on each particle for an overdamped system (particle
     velocity times damping parameter) between two points in time. Removes
@@ -158,7 +118,8 @@ def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,periodic_bo
     else:
         return (coords1 - coords0).dropna()*gamma/dt
 
-def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,periodic_boundary=False):
+def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,
+                               periodic_boundary=False):
     """
     calculate forces acting on each particle for an inertial system (molecular
     dynamics-like) between two points in time. Removes particles which occur
@@ -240,9 +201,10 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
     m : int
         number of discretization steps to bin the matrix into. The bin with
         will be rmax/m.
-    boundary : tuple of form ((xmin,xmax),(ymin,ymax),(zmin,zmax)),optional
-        coordinates of the box boundaries. The default is the min and max 
-        values found in the dataset.
+    boundary : tuple, optional
+        boundaries of the box in which the coordinates are defined in the form
+        ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
+        value found in the coordinates along each axis.
     remove_near_boundary : bool, optional
         If true, particles which are closer than rmax from any of the
         boundaries are removed. Only possible when periodic_boundary=False.
@@ -253,7 +215,8 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
         if True and when using nonperiodic boundary conditions, this switches
         to a brute-force approach where every possible particle pair is
         evaluated instead of (the default) efficient KDtree approach for pair
-        finding. When periodic_boundary=True, bruteforcing is always used.
+        finding. When periodic_boundary=True, bruteforcing is always used. The
+        default is False.
 
     Returns
     -------
@@ -353,8 +316,6 @@ def save_forceprofile(
         filename,
         rsteps,
         rmax,
-        gamma,
-        diameter,
         forces,
         counts):
     """
@@ -367,11 +328,7 @@ def save_forceprofile(
     rsteps : int
         number of bins
     rmax : float
-        max r
-    gamma : float
-        damping coefficient
-    diameter : float
-        diameter of the particles (in same unit as r)
+        cut-off radius for force
     forces : list of float
         list of force values as obtained from the trajectory analysis
     counts : list of int
@@ -382,12 +339,10 @@ def save_forceprofile(
     None.
 
     """
-    with open(filename,'w') as file:
+    with open(filename,'w+') as file:
         #write input parameters
         file.write("rsteps:\t{}\n".format(rsteps))
         file.write("rmax:\t{}\n".format(rmax))
-        file.write("diam:\t{}\n".format(diameter))
-        file.write("gamma:\t{}\n".format(gamma))
         file.write('\n')
 
         #write table headers
@@ -416,6 +371,10 @@ def load_forceprofile(filename):
         the mean force in each bin
     counts : list
         the number of particle pairs counted for each bin
+    rsteps : int
+        number of discretization steps
+    rmax : float
+        cut-off radius for force
 
     """
     with open(filename,'r') as file:
@@ -424,45 +383,60 @@ def load_forceprofile(filename):
     #load input parameters
     rsteps = int(filedata[0].split()[1])
     rmax = float(filedata[1].split()[1])
-    diameter = float(filedata[2].split()[1])
-    gamma = float(filedata[3].split()[1])
 
     #load data table
     rvals = []
     forces = []
     counts = []
 
-    for line in filedata[6:]:
+    for line in filedata[4:]:
         line = line.split()
         rvals.append(float(line[0]))
         forces.append(float(line[1]))
         counts.append(int(line[2]))
 
-    return (rvals,forces,counts),(rsteps,rmax,diameter,gamma)
+    return rvals,forces,counts,rsteps,rmax
 
 def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
-               periodic_boundary=False):
+               periodic_boundary=False,remove_near_boundary=True):
     """
-    
+    Run the analysis for overdamped dynamics (brownian dynamics like), iterates
+    over all subsequent sets of two timesteps and obtains forces from the 
+    velocity of the particles as a function of the distribution of the
+    particles around eachother.
 
     Parameters
     ----------
-    coordinates : iterable of pandas.DataFrames
-        list with a pandas.DataFrame for each timestep, containing particle
-        coordinates in columns 'x', 'y' and 'z' and indexed by particle number
-    times : list of floats
-        timestamps for the sets of coordinates, must have same length as 
-        coordinates
-    boxbounds : TYPE, optional
-        DESCRIPTION. The default is None.
-    gamma : TYPE, optional
-        DESCRIPTION. The default is 1.
-    rmax : TYPE, optional
-        DESCRIPTION. The default is 1.
-    m : TYPE, optional
-        DESCRIPTION. The default is 20.
-    periodic_boundary : TYPE, optional
-        DESCRIPTION. The default is False.
+    coordinates : list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep. Must be
+        indexed by particle ID and contain coordinates in columns 'x', 'y' and
+        'z'.
+    times : list of float
+        list timestamps corresponding to the coordinates
+    boxbounds : tuple, optional
+        boundaries of the box in which the coordinates are defined in the form
+        ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
+        value found in the coordinates along each axis.
+    gamma : float, optional
+        damping/friction coefficient (kT/D) for calculation of F=V*kT/D. The
+        default is 1.
+    rmax : float, optional
+        cut-off radius for calculation of the pairwise forces. The default is
+        1.
+    m : int, optional
+        The number of discretization steps for the force profile, i.e. the
+        number of bins from 0 to rmax into which the data will be sorted. The
+        default is 20.
+    periodic_boundary : bool, optional
+        Whether the box has periodic boundary conditions. The default is False.
+    remove_near_boundary : bool, optional
+        If true, particles which are closer than rmax from any of the
+        boundaries are not analyzed, but still accounted for when analyzing
+        particles closer to the center of the box in order to only analyze 
+        particles for which the full spherical shell up to rmax is within the 
+        box of coordinates, and to prevent erroneous handling of particles
+        which interact with other particles outside the measurement volume.
+        Only possible when periodic_boundary=False. The default is True.
 
     Returns
     -------
@@ -518,7 +492,8 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
                 coords0.loc[set(coords0.index).intersection(coords1.index)],
                 rmax,
                 m,
-                boundary=boxbounds
+                boundary=boxbounds,
+                remove_near_boundary=remove_near_boundary
                 )
         coefficients.append(C)
         counts.append(c)
@@ -541,22 +516,33 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
 def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
                periodic_boundary=False):
     """
-    
+    Run the analysis for inertial dynamics (molecular dynamics like), iterates
+    over all subsequent sets of three timesteps and obtains forces from the 
+    accellerations of the particles.
 
     Parameters
     ----------
-    coordinates : TYPE
-        DESCRIPTION.
-    boxbounds : TYPE, optional
-        DESCRIPTION. The default is None.
-    mass : TYPE, optional
-        DESCRIPTION. The default is 1.
-    rmax : TYPE, optional
-        DESCRIPTION. The default is 1.
-    m : TYPE, optional
-        DESCRIPTION. The default is 20.
-    periodic_boundary : TYPE, optional
-        DESCRIPTION. The default is False.
+    coordinates : list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep. Must be
+        indexed by particle ID and contain coordinates in columns 'x', 'y' and
+        'z'.
+    times : list of float
+        list timestamps corresponding to the coordinates
+    boxbounds : tuple, optional
+        boundaries of the box in which the coordinates are defined in the form
+        ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
+        value found in the coordinates along each axis.
+    mass : float, optional
+        particle mass for calculation of F=m*a. The default is 1.
+    rmax : float, optional
+        cut-off radius for calculation of the pairwise forces. The default is
+        1.
+    m : int, optional
+        The number of discretization steps for the force profile, i.e. the
+        number of bins from 0 to rmax into which the data will be sorted. The
+        default is 20.
+    periodic_boundary : bool, optional
+        Whether the box has periodic boundary conditions. The default is False.
 
     Returns
     -------
