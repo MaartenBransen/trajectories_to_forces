@@ -440,16 +440,18 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
 
     Returns
     -------
-    coefficients : TYPE
-        DESCRIPTION.
-    forces : TYPE
-        DESCRIPTION.
-    G : TYPE
-        DESCRIPTION.
-    G_err : TYPE
-        DESCRIPTION.
-    counts : TYPE
-        DESCRIPTION.
+    coefficients : numpy.array of m by 3n*(len(times)-1)
+        coefficient matrix of the full dataset
+    forces : numpy.array of length 3n*(len(times)-1)
+        vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
+        tn-1pnz]
+    G : numpy.array of length m
+        discretized force vector, the result of the computation.
+    G_err : numpy.array of length m
+        errors in G based on the least_squares solution of the matrix equation
+    counts : numpy.array of length m
+        number of individual force evaluations contributing to the result in
+        each bin.
 
     """
     #get timestamps from coordinates
@@ -546,16 +548,18 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
 
     Returns
     -------
-    coordinates : TYPE
-        DESCRIPTION.
-    forces : TYPE
-        DESCRIPTION.
-    coefficients : TYPE
-        DESCRIPTION.
-    pairwise_force : TYPE
-        DESCRIPTION.
-    pairwise_force_err : TYPE
-        DESCRIPTION.
+    coefficients : numpy.array of m by 3n*(len(times)-2)
+        coefficient matrix of the full dataset
+    forces : numpy.array of length 3n*(len(times)-2)
+        vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
+        tn-2pnz]
+    G : numpy.array of length m
+        discretized force vector, the result of the computation.
+    G_err : numpy.array of length m
+        errors in G based on the least_squares solution of the matrix equation
+    counts : numpy.array of length m
+        number of individual force evaluations contributing to the result in
+        each bin.
 
     """
     nt = len(times)
