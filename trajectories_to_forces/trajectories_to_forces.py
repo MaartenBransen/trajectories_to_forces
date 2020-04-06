@@ -4,16 +4,34 @@ import pandas as pd
 import numpy as np
 from scipy.spatial import cKDTree
 from itertools import tee,islice
+import numba as nb
 
 #%% private definitions
 
 def _nwise(iterable, n=2):
     """
     Loops over sets of n subsequent items of an iterable. For example n=2:
+        
         s -> (s0,s1), (s1,s2), (s2, s3), ..., (sn-1,sn)
+    
     or n=3:
+    
         s -> (s0,s1,s2), (s1,s2,s3), ... ,(sn-2,sn-1,sn)
-    """                                     
+
+    Parameters
+    ----------
+    iterable : iterable
+        list of values
+    n : int, optional
+        size of the tuples returned. The default is 2.
+
+    Returns
+    -------
+    iterable of tuples
+        iterable of tuples in which each tuple contains the set of `n`
+        subsequent values from the input
+
+    """                                    
     iters = tee(iterable, n)                                                     
     for i, it in enumerate(iters):                                               
         next(islice(it, i, i), None)                                               
@@ -182,10 +200,26 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,
     else:
         return (coords0 - 2*coords1 + coords2).dropna()*mass/dt**2
 
-def _calculate_coefficients(coords,rmax,m,boundary=None,
-                            remove_near_boundary=False,
-                            periodic_boundary=False,
-                            bruteforce=False):
+
+@nb.njit()
+def _coefficient_pair_loop_nb(particles,queryparticles,dist,indices,mask,rmax,m):
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),m))
+    counter = np.zeros(m)
+    
+    #loop over pairs in distance/indices array
+    for i in range(len(queryparticles)):
+        for j in range(len(particles)):
+            if not mask[i,j]:
+                d = dist[i,j]
+                counter[int(d/rmax*m)] += 1
+                for dim in range(3):
+                    coefficients[3*i+dim,int(d/rmax*m)] += (queryparticles[i,dim]-particles[indices[i,j],dim])/d
+
+    return coefficients,counter
+
+def _calculate_coefficients(coords,query_indices,rmax,m,boundary=None,
+                            periodic_boundary=False,bruteforce=False):
     """
     Uses a brute force method for finding all neighbours of particles within 
     a cutoff radius and then calculates the coefficient matrix C* from the
@@ -194,8 +228,11 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
     Parameters
     ----------
     coords : pandas.DataFrame
-        coordinates for which to calculate proximity coefficients, must have
-        columns 'x', 'y' and 'z' for cartesian coordinates
+        all particle coordinates in the system to consider in evaluating the
+        coefficients. Must have columns 'x', 'y' and 'z' for cartesian
+        coordinates and indices corresponding to those in query_indices
+    query_indices : list
+        indices corresponding to the 
     rmax : float
         cut-off radius up to which to calculate the coefficients.
     m : int
@@ -205,10 +242,6 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
         boundaries of the box in which the coordinates are defined in the form
         ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
         value found in the coordinates along each axis.
-    remove_near_boundary : bool, optional
-        If true, particles which are closer than rmax from any of the
-        boundaries are removed. Only possible when periodic_boundary=False.
-        The default is False.
     periodic_boundary : bool, optional
         whether the box has periodic boundary conditions. The default is False.
     bruteforce : bool, optional
@@ -230,31 +263,24 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
   
     #set default boundaries to limits of coordinates if boundary is not given
     if boundary == None:
+        if periodic_boundary:
+            raise SyntaxError('when using periodic_boundary, boundary must be given')
         xmin, xmax = coords.x.min(), coords.x.max()
         ymin, ymax = coords.y.min(), coords.y.max()
         zmin, zmax = coords.z.min(), coords.z.max()
     
-    #otherwise use given boundary
-    else:
-        ((xmin,xmax),(ymin,ymax),(zmin,zmax)) = boundary
-
-    #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
-    coords.sort_index(inplace=True)
-    particles = coords[['x', 'y', 'z']].to_numpy()
-
-    #allocate memory for coefficient matrix
-    coefficients = np.zeros((3*len(particles),m))
-    counter = np.zeros(m)
+    if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
+        raise ValueError('rmax cannot be more than half the smallest box dimension')
     
     #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
     coords.sort_index(inplace=True)
     particles = coords[['x', 'y', 'z']].to_numpy()
-    
-    #allocate memory for coefficient matrix
-    coefficients = np.zeros((3*len(particles),m))
-    counter = np.zeros(m)
-    
+    queryparticles = coords.loc[sorted(query_indices)][['x', 'y', 'z']].to_numpy()
+      
     if periodic_boundary:
+        #allocate memory for coefficient matrix
+        coefficients = np.zeros((3*len(queryparticles),m))
+        counter = np.zeros(m)
         for i in range(len(particles)):
             for j in range(len(particles)):
                 if i != j:
@@ -267,6 +293,9 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
     
     #no periodic boundary conditions bruteforce
     elif bruteforce:
+        #allocate memory for coefficient matrix
+        coefficients = np.zeros((3*len(queryparticles),m))
+        counter = np.zeros(m)
         for i in range(len(particles)):
             for j in range(len(particles)):
                 d = np.sum((particles[i]-particles[j])**2)**0.5
@@ -276,38 +305,16 @@ def _calculate_coefficients(coords,rmax,m,boundary=None,
     
     #no periodic boundary conditions, efficient neighbour search
     else:
-        #no periodic boundary conditions, efficient neighbour search
-        #initialize and query tree for fast pairfinding (see scipy documentation)
-        ckdtree = cKDTree(particles)
-        pairs = ckdtree.query_pairs(rmax)
         
-        #remove particles closer than rmax to boundary
-        if remove_near_boundary:
-            for i,j in pairs:
-                d = np.sum((particles[i]-particles[j])**2)**0.5
-    
-                #check if i at least cutoff from boundary
-                if all(particles[i]-rmax > [xmin,ymin,zmin]) and all(particles[i]+rmax < [xmax,ymax,zmax]):
-                    counter[int(d/rmax*m)] += 1
-                    for dim in range(3):
-                        coefficients[3*i+dim,int(d/rmax*m)] += (particles[i,dim]-particles[j,dim])/d
-    
-                #check if j at least cutoff from boundary
-                if all(particles[j]-rmax > [xmin,ymin,zmin]) and all(particles[j]+rmax < [xmax,ymax,zmax]):
-                    counter[int(d/rmax*m)] += 1
-                    for dim in range(3):
-                        coefficients[3*j+dim,int(d/rmax*m)] += (particles[j,dim]-particles[i,dim])/d
-    
-        #otherwise check all pairs
-        else:
-            for i,j in pairs:
-                d = np.sum((particles[i]-particles[j])**2)**0.5
-                counter[int(d/rmax*m)] += 2
-                for dim in range(3):
-                    coefficients[3*i+dim,int(d/rmax*m)] += (particles[i,dim]-particles[j,dim])/d
-                    coefficients[3*j+dim,int(d/rmax*m)] += (particles[j,dim]-particles[i,dim])/d
+        #initialize and query KDTree for fast pairfinding (see scipy documentation)
+        
+        tree = cKDTree(particles)
+        dist,indices = tree.query(queryparticles,k=len(particles),distance_upper_bound=rmax)
+        mask = (~np.isfinite(dist)) | (dist==0)#remove pairs with self and np.inf fill values
+        
+        #perform numba-optimized loop over particle pairs
+        coefficients,counter = _coefficient_pair_loop_nb(particles,queryparticles,dist,indices,mask,rmax,m)
 
-    
     return coefficients,counter
 
 #%% public definitions
@@ -397,8 +404,9 @@ def load_forceprofile(filename):
 
     return rvals,forces,counts,rsteps,rmax
 
-def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
-               periodic_boundary=False,remove_near_boundary=True):
+def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
+                                m=20,periodic_boundary=False,
+                                remove_near_boundary=True):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -413,7 +421,7 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
         'z'.
     times : list of float
         list timestamps corresponding to the coordinates
-    boxbounds : tuple, optional
+    boundary : tuple, optional
         boundaries of the box in which the coordinates are defined in the form
         ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
         value found in the coordinates along each axis.
@@ -441,7 +449,7 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
     Returns
     -------
     coefficients : numpy.array of m by 3n*(len(times)-1)
-        coefficient matrix of the full dataset
+        coefficient matrix of the full dataset as specified in [1]
     forces : numpy.array of length 3n*(len(times)-1)
         vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
         tn-1pnz]
@@ -452,13 +460,19 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
     counts : numpy.array of length m
         number of individual force evaluations contributing to the result in
         each bin.
+        
+    References
+    ----------
+    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction potentials
+    from arbitrary multi-particle trajectory data. Soft Matter, 11(35),
+    6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
     #get timestamps from coordinates
     nt = len(times)
     
-    if boxbounds == None:
-        boxbounds = (
+    if boundary == None:
+        boundary = (
             (coordinates.x.min(),coordinates.x.max()),
             (coordinates.y.min(),coordinates.y.max()),
             (coordinates.z.min(),coordinates.z.max())
@@ -475,14 +489,27 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
         #print progress
         print('\revaluating time interval {:.5f} to {:.5f} (step {:d} of {:d})'.format(t0,t1,i+1,nt-1),end='',flush=True)
         
+        #find the particles which are far enough from boundary
+        if remove_near_boundary:
+            selected = coords0.loc[(
+                (coords0['x']>=boundary[0][0]+rmax) &
+                (coords0['x']< boundary[0][1]-rmax) &
+                (coords0['y']>=boundary[1][0]+rmax) &
+                (coords0['y']< boundary[1][1]-rmax) &
+                (coords0['z']>=boundary[2][0]+rmax) &
+                (coords0['z']< boundary[2][1]-rmax)
+                )].index
+        else:
+            selected = coords0.index
+
         #calculate the force vector containin the total force acting on each particle
         f = _calculate_forces_overdamped(
-                coords0[['x','y','z']],
+                coords0.loc[selected][['x','y','z']],
                 coords1[['x','y','z']],
                 t1-t0,
                 gamma=gamma,
                 periodic_boundary=periodic_boundary,
-                boundary=boxbounds
+                boundary=boundary
                 ).sort_index()
         
         #reshape f to 3n vector and add to total vector
@@ -492,10 +519,10 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
         #find neighbours and coefficients at time t0 for all particles present in t0 and t1
         C,c = _calculate_coefficients(
                 coords0.loc[set(coords0.index).intersection(coords1.index)],
+                set(selected).intersection(coords1.index),
                 rmax,
                 m,
-                boundary=boxbounds,
-                remove_near_boundary=remove_near_boundary
+                boundary=boundary,
                 )
         coefficients.append(C)
         counts.append(c)
@@ -506,7 +533,12 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
     coefficients = np.concatenate(coefficients,axis=0)
     forces  = np.concatenate(forces,axis=0)
     counts = np.sum(counts,axis=0)
-
+    
+    #remove rows with only zeros
+    mask = (np.sum(coefficients,axis=1) != 0)
+    coefficients = coefficients[mask]
+    forces = forces[mask]
+    
     #solve eq. 15 from the paper
     #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
     G,G_err,_,_ = np.linalg.lstsq(np.dot(coefficients.T,coefficients),np.dot(coefficients.T,forces),rcond=None)
@@ -515,7 +547,8 @@ def run_overdamped(coordinates,times,boxbounds=None,gamma=1,rmax=1,m=20,
     print('done')
     return coefficients,forces,G,G_err,counts
 
-def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
+
+def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                periodic_boundary=False):
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
@@ -530,7 +563,7 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
         'z'.
     times : list of float
         list timestamps corresponding to the coordinates
-    boxbounds : tuple, optional
+    boundary : tuple, optional
         boundaries of the box in which the coordinates are defined in the form
         ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
         value found in the coordinates along each axis.
@@ -549,7 +582,7 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
     Returns
     -------
     coefficients : numpy.array of m by 3n*(len(times)-2)
-        coefficient matrix of the full dataset
+        coefficient matrix of the full dataset as specified in [1]
     forces : numpy.array of length 3n*(len(times)-2)
         vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
         tn-2pnz]
@@ -560,6 +593,12 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
     counts : numpy.array of length m
         number of individual force evaluations contributing to the result in
         each bin.
+    
+    References
+    ----------
+    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction potentials
+    from arbitrary multi-particle trajectory data. Soft Matter, 11(35),
+    6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
     nt = len(times)
@@ -584,7 +623,7 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
                 (t2-t0)/2,
                 mass = mass,
                 periodic_boundary=periodic_boundary,
-                boundary=boxbounds
+                boundary=boundary
                 ).sort_index()
         
         #reshape f to 3n vector and append to total result
@@ -597,7 +636,7 @@ def run_inertial(coordinates,times,boxbounds=None,mass=1,rmax=1,m=20,
                 rmax=rmax,
                 m=m,
                 periodic_boundary=periodic_boundary,
-                boundary=boxbounds
+                boundary=boundary
                 )
         coefficients.append(C)
         counts.append(c)
