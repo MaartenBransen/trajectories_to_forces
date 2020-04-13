@@ -37,20 +37,6 @@ def _nwise(iterable, n=2):
         next(islice(it, i, i), None)                                               
     return zip(*iters)
 
-def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
-    """calculates element-wise distances between two sets of n-dimensional 
-    coordinates while wrapping around boundaries of periodic box with bounds
-    boxmin, boxmax along each dimension"""
-    distances = []
-    for i,j,mi,ma in zip(ci,cj,boxmin,boxmax):
-        if i-j > (ma-mi)/2:
-            distances.append(i-j-ma+mi)
-        elif i-j <= (mi-ma)/2:
-            distances.append(i-j+ma-mi)
-        else:
-            distances.append(i-j)
-    return np.array(distances)
-
 def _calculate_displacement_periodic(x0,x1,xmin,xmax):
     """calulate displacement under periodic boundary conditions in 1D"""
     if x1-x0 > (xmax-xmin)/2:
@@ -201,20 +187,96 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,
         return (coords0 - 2*coords1 + coords2).dropna()*mass/dt**2
 
 
-@nb.njit()
+@nb.njit(parallel=True)
 def _coefficient_pair_loop_nb(particles,queryparticles,dist,indices,mask,rmax,m):
+    """loop over all pairs found by KDTree.query and calculate coefficients"""
     #allocate memory for coefficient matrix
     coefficients = np.zeros((3*len(queryparticles),m))
     counter = np.zeros(m)
     
     #loop over pairs in distance/indices array
-    for i in range(len(queryparticles)):
+    for i in nb.prange(len(queryparticles)):
         for j in range(len(particles)):
             if not mask[i,j]:
                 d = dist[i,j]
                 counter[int(d/rmax*m)] += 1
                 for dim in range(3):
                     coefficients[3*i+dim,int(d/rmax*m)] += (queryparticles[i,dim]-particles[indices[i,j],dim])/d
+
+    return coefficients,counter
+
+@nb.njit(parallel=True)
+def _bruteforce_pair_loop_nb(particles,queryparticles,rmax,m):
+    """loop over all pairs with i from queryparticles and j from particles, and
+    calculate coefficients"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),m))
+    counter = np.zeros(m)
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(len(queryparticles)):
+        for j in range(len(particles)):
+            d = np.sum((queryparticles[i]-particles[j])**2)**0.5
+            if d < rmax and d != 0:
+                counter[int(d/rmax*m)] += 1
+                for dim in range(3):
+                    coefficients[3*i+dim,int(d/rmax*m)] += (queryparticles[i,dim]-particles[j,dim])/d
+
+    return coefficients,counter
+
+@nb.njit()
+def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
+    """calculates element-wise distances between two sets of n-dimensional 
+    coordinates while wrapping around boundaries of periodic box with bounds
+    boxmin, boxmax along each dimension"""
+    distances = np.empty(len(ci))
+    for dim,(i,j,mi,ma) in enumerate(zip(ci,cj,boxmin,boxmax)):
+        if i-j > (ma-mi)/2:
+            distances[dim] = i-j-ma+mi
+        elif i-j <= (mi-ma)/2:
+            distances[dim] = i-j+ma-mi
+        else:
+            distances[dim] = i-j
+    return distances
+
+@nb.njit(parallel=True)
+def _coefficient_pair_loop_periodic_nb(particles,queryparticles,dist,indices,
+                                       mask,rmax,m,boxmin,boxmax):
+    """loop over all pairs found by KDTree.query and calculate coefficients in 
+    periodic boundary conditions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),m))
+    counter = np.zeros(m)
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(len(queryparticles)):
+        for j in range(len(particles)):
+            if not mask[i,j]:
+                d_xyz = _distance_periodic_wrap(queryparticles[i],particles[indices[i,j]],boxmin,boxmax)
+                d = dist[i,j]
+                counter[int(d/rmax*m)] += 1
+                for dim in range(3):
+                    coefficients[3*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
+
+    return coefficients,counter
+
+@nb.njit(parallel=True)
+def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,rmax,m,boxmin,boxmax):
+    """loop over all pairs with i from queryparticles and j from particles, and
+    calculate coefficients in periodic boundary conditions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),m))
+    counter = np.zeros(m)
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(len(queryparticles)):
+        for j in range(len(particles)):
+            d_xyz = _distance_periodic_wrap(queryparticles[i],particles[j],boxmin,boxmax)
+            d = np.sum(d_xyz**2)**0.5
+            if d < rmax and d != 0:
+                counter[int(d/rmax*m)] += 1
+                for dim in range(3):
+                    coefficients[3*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
 
     return coefficients,counter
 
@@ -262,58 +324,55 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary=None,
     """
   
     #set default boundaries to limits of coordinates if boundary is not given
-    if boundary == None:
-        if periodic_boundary:
-            raise SyntaxError('when using periodic_boundary, boundary must be given')
-        xmin, xmax = coords.x.min(), coords.x.max()
-        ymin, ymax = coords.y.min(), coords.y.max()
-        zmin, zmax = coords.z.min(), coords.z.max()
-    
-    if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
-        raise ValueError('rmax cannot be more than half the smallest box dimension')
+    if boundary == None and periodic_boundary:
+        raise SyntaxError('when using periodic_boundary, boundary must be given')
     
     #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
     coords.sort_index(inplace=True)
     particles = coords[['x', 'y', 'z']].to_numpy()
     queryparticles = coords.loc[sorted(query_indices)][['x', 'y', 'z']].to_numpy()
-      
+    
+    #coefficient calculation in periodic boundary conditions
     if periodic_boundary:
-        #allocate memory for coefficient matrix
-        coefficients = np.zeros((3*len(queryparticles),m))
-        counter = np.zeros(m)
-        for i in range(len(particles)):
-            for j in range(len(particles)):
-                if i != j:
-                    d_xyz = _distance_periodic_wrap(particles[i],particles[j],[xmin,ymin,zmin],[xmax,ymax,zmax])
-                    d = np.sum(d_xyz**2)**0.5
-                    if d<rmax:
-                        counter[int(d/rmax*m)] += 1
-                        for dim in range(3):
-                            coefficients[int(3*i+dim),int(d/rmax*m)] += d_xyz[dim]/d
+        
+        boundary = np.array(boundary)
+        boxmin = boundary[:,0]
+        boxmax = boundary[:,1]
+        
+        #optionally use (in most cases inefficient) brute-force search through all pairs
+        if bruteforce:
+            coefficients,counter = _bruteforce_pair_loop_periodic_nb(particles,queryparticles,rmax,m,boxmin,boxmax)
+        
+        #use KDTree based efficient neighbour searching algorithm
+        else:
+            #correct box and coordinates to have lower lim at 0 for cKDTree
+            particles -= boxmin
+            queryparticles -= boxmin
+            boxmax -= boxmin
+            boxmin -= boxmin
+            
+            #initialize and query periodic KDTree for pairs within rmax
+            tree = cKDTree(particles,boxsize=boxmax)
+            dist,indices = tree.query(queryparticles,k=len(particles),distance_upper_bound=rmax)
+            mask = (~np.isfinite(dist)) | (dist==0)#remove pairs with self and np.inf fill values
+            
+            coefficients,counter = _coefficient_pair_loop_periodic_nb(particles,queryparticles,dist,indices,mask,rmax,m,boxmin,boxmax)
     
-    #no periodic boundary conditions bruteforce
-    elif bruteforce:
-        #allocate memory for coefficient matrix
-        coefficients = np.zeros((3*len(queryparticles),m))
-        counter = np.zeros(m)
-        for i in range(len(particles)):
-            for j in range(len(particles)):
-                d = np.sum((particles[i]-particles[j])**2)**0.5
-                if d < rmax and i != j:
-                    for dim in range(3):
-                        coefficients[3*i+dim,int(d/rmax*m)] += (particles[i,dim]-particles[j,dim])/d
-    
-    #no periodic boundary conditions, efficient neighbour search
+    #no periodic boundary conditions
     else:
+        #optionally use (in most cases inefficient) brute-force search through all pairs
+        if bruteforce:
+            coefficients,counter = _bruteforce_pair_loop_nb(particles,queryparticles,rmax,m)
         
-        #initialize and query KDTree for fast pairfinding (see scipy documentation)
-        
-        tree = cKDTree(particles)
-        dist,indices = tree.query(queryparticles,k=len(particles),distance_upper_bound=rmax)
-        mask = (~np.isfinite(dist)) | (dist==0)#remove pairs with self and np.inf fill values
-        
-        #perform numba-optimized loop over particle pairs
-        coefficients,counter = _coefficient_pair_loop_nb(particles,queryparticles,dist,indices,mask,rmax,m)
+        #use KDTree based efficient neighbour searching algorithm
+        else:
+            #initialize and query KDTree for fast pairfinding (see scipy documentation)
+            tree = cKDTree(particles)
+            dist,indices = tree.query(queryparticles,k=len(particles),distance_upper_bound=rmax)
+            mask = (~np.isfinite(dist)) | (dist==0)#remove pairs with self and np.inf fill values
+            
+            #perform numba-optimized loop over particle pairs
+            coefficients,counter = _coefficient_pair_loop_nb(particles,queryparticles,dist,indices,mask,rmax,m)
 
     return coefficients,counter
 
@@ -405,7 +464,7 @@ def load_forceprofile(filename):
     return rvals,forces,counts,rsteps,rmax
 
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
-                                m=20,periodic_boundary=False,
+                                m=20,periodic_boundary=False,bruteforce=False,
                                 remove_near_boundary=True):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
@@ -523,6 +582,8 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                 rmax,
                 m,
                 boundary=boundary,
+                bruteforce=bruteforce,
+                periodic_boundary=periodic_boundary,
                 )
         coefficients.append(C)
         counts.append(c)
