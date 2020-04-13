@@ -322,11 +322,6 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary=None,
         total number of pair counts for each column in the matrix
 
     """
-  
-    #set default boundaries to limits of coordinates if boundary is not given
-    if boundary == None and periodic_boundary:
-        raise SyntaxError('when using periodic_boundary, boundary must be given')
-    
     #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
     coords.sort_index(inplace=True)
     particles = coords[['x', 'y', 'z']].to_numpy()
@@ -495,7 +490,13 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
     periodic_boundary : bool, optional
-        Whether the box has periodic boundary conditions. The default is False.
+        Whether the box has periodic boundary conditions. If True, the boundary
+        must be given. The default is False.
+    bruteforce : bool, optional
+        If True, the coefficients are calculated in a naive brute-force 
+        approach with a nested loop over all particles. The default is False,
+        which uses a scipy.spatial.cKDTree based approach to only evaluate 
+        pairs which are <rmax apart.
     remove_near_boundary : bool, optional
         If true, particles which are closer than rmax from any of the
         boundaries are not analyzed, but still accounted for when analyzing
@@ -522,9 +523,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
         
     References
     ----------
-    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction potentials
-    from arbitrary multi-particle trajectory data. Soft Matter, 11(35),
-    6948–6956. https://doi.org/10.1039/C5SM01233C
+    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction
+    potentials from arbitrary multi-particle trajectory data. Soft Matter, 11
+    (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
     #get timestamps from coordinates
@@ -550,6 +551,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
         
         #find the particles which are far enough from boundary
         if remove_near_boundary:
+            if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
+                raise ValueError('when remove_near_boundary=True, rmax cannot be more than half the smallest box dimension')
+            
             selected = coords0.loc[(
                 (coords0['x']>=boundary[0][0]+rmax) &
                 (coords0['x']< boundary[0][1]-rmax) &
@@ -560,6 +564,24 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                 )].index
         else:
             selected = coords0.index
+        
+        #check inputs
+        if periodic_boundary:
+            if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
+                raise ValueError('when periodic_boundary=True, rmax cannot be more than half the smallest box dimension')
+            if boundary==None:
+                raise ValueError('when periodic_boundary=True, boundary must be given')
+            mask = ((coords0['x'] < boundary[0][0]) & 
+                (coords0['x'] >= boundary[0][1]) & 
+                (coords0['y'] < boundary[1][0]) & 
+                (coords0['y'] >= boundary[1][1]) & 
+                (coords0['z'] < boundary[2][0]) & 
+                (coords0['z'] >= boundary[2][1]))
+            if sum(mask) > 0:
+                print('\n[WARNING] trajectories_to_forces.run_overdamped: some'+
+                      ' coordinates are outside of boundary and will be removed')
+                coords0 = coords0.loc[~mask]
+                    
 
         #calculate the force vector containin the total force acting on each particle
         f = _calculate_forces_overdamped(
@@ -610,7 +632,8 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
 
 
 def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
-               periodic_boundary=False):
+               periodic_boundary=False,bruteforce=False,
+               remove_near_boundary=False):
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
     over all subsequent sets of three timesteps and obtains forces from the 
@@ -638,7 +661,21 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
     periodic_boundary : bool, optional
-        Whether the box has periodic boundary conditions. The default is False.
+        Whether the box has periodic boundary conditions. If True, the boundary
+        must be given. The default is False.
+    bruteforce : bool, optional
+        If True, the coefficients are calculated in a naive brute-force 
+        approach with a nested loop over all particles. The default is False,
+        which uses a scipy.spatial.cKDTree based approach to only evaluate 
+        pairs which are <rmax apart.
+    remove_near_boundary : bool, optional
+        If true, particles which are closer than rmax from any of the
+        boundaries are not analyzed, but still accounted for when analyzing
+        particles closer to the center of the box in order to only analyze 
+        particles for which the full spherical shell up to rmax is within the 
+        box of coordinates, and to prevent erroneous handling of particles
+        which interact with other particles outside the measurement volume.
+        Only possible when periodic_boundary=False. The default is True.
 
     Returns
     -------
@@ -676,10 +713,43 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         #print progress
         print('\revaluating time interval {:.3f} to {:.3f} (step {:d} of {:d})'.format(t0,t2,i+1,nt-2),end='',flush=True)
         
+        #find the particles which are far enough from boundary
+        if remove_near_boundary:
+            if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
+                raise ValueError('when remove_near_boundary=True, rmax cannot be more than half the smallest box dimension')
+            
+            selected = coords1.loc[(
+                (coords1['x']>=boundary[0][0]+rmax) &
+                (coords1['x']< boundary[0][1]-rmax) &
+                (coords1['y']>=boundary[1][0]+rmax) &
+                (coords1['y']< boundary[1][1]-rmax) &
+                (coords1['z']>=boundary[2][0]+rmax) &
+                (coords1['z']< boundary[2][1]-rmax)
+                )].index
+        else:
+            selected = coords1.index
+        
+        #check inputs
+        if periodic_boundary:
+            if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
+                raise ValueError('when periodic_boundary=True, rmax cannot be more than half the smallest box dimension')
+            if boundary==None:
+                raise ValueError('when periodic_boundary=True, boundary must be given')
+            mask = ((coords1['x'] < boundary[0][0]) & 
+                (coords1['x'] >= boundary[0][1]) & 
+                (coords1['y'] < boundary[1][0]) & 
+                (coords1['y'] >= boundary[1][1]) & 
+                (coords1['z'] < boundary[2][0]) & 
+                (coords1['z'] >= boundary[2][1]))
+            if sum(mask) > 0:
+                print('\n[WARNING] trajectories_to_forces.run_overdamped: some'+
+                      ' coordinates are outside of boundary and will be removed')
+                coords1 = coords1.loc[~mask]
+        
         #calculate the force vector containing the total force acting on each particle
         f = _calculate_forces_inertial(
                 coords0[['x','y','z']],
-                coords1[['x','y','z']],
+                coords1.loc[selected][['x','y','z']],
                 coords2[['x','y','z']],
                 (t2-t0)/2,
                 mass = mass,
@@ -693,11 +763,13 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         
         #find neighbours and coefficients 
         C,c = _calculate_coefficients(
-                coords1.loc[set(coords0.index).intersection(coords1.index).intersection(coords2.index)],
-                rmax=rmax,
-                m=m,
+                coords1.loc[set(coords1.index).intersection(coords0.index).intersection(coords2.index)],
+                set(selected).intersection(coords0.index).intersection(coords2.index),
+                rmax,
+                m,
+                boundary=boundary,
+                bruteforce=bruteforce,
                 periodic_boundary=periodic_boundary,
-                boundary=boundary
                 )
         coefficients.append(C)
         counts.append(c)
