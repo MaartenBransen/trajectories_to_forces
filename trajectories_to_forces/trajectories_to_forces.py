@@ -82,7 +82,7 @@ def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,
         default is 1.
     periodic_boundary : bool, optional
         Whether the coordinates are in a periodic box. The default is False.
-    boundary : tuple of form ((xmin,xmax),(ymin,ymax),(zmin,zmax))
+    boundary : tuple of form ((zmin,zmax),(ymin,ymax),(xmin,xmax))
         coordinates of the box boundaries.
 
     Returns
@@ -98,11 +98,11 @@ def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,
         for col in cols:
             
             #check dimension boundaries
-            if col=='x':
+            if col=='z':
                 colmin,colmax = boundary[0]
             elif col=='y':
                 colmin,colmax = boundary[1]
-            elif col=='z':
+            elif col=='x':
                 colmin,colmax = boundary[2]
             else:
                 raise KeyError('incorrect column in data: ',col)
@@ -144,7 +144,7 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,
         default is 1.
     periodic_boundary : bool, optional
         Whether the coordinates are in a periodic box. The default is False.
-    boundary : tuple of form ((xmin,xmax),(ymin,ymax),(zmin,zmax))
+    boundary : tuple of form ((zmin,zmax),(ymin,ymax),(xmin,xmax))
         coordinates of the box boundaries.
 
     Returns
@@ -160,11 +160,11 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,mass=1,
         for col in cols:
             
             #check dimension boundaries
-            if col=='x':
+            if col=='z':
                 colmin,colmax = boundary[0]
             elif col=='y':
                 colmin,colmax = boundary[1]
-            elif col=='z':
+            elif col=='x':
                 colmin,colmax = boundary[2]
             else:
                 raise KeyError('incorrect column in data: ',col)
@@ -302,7 +302,7 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary=None,
         will be rmax/m.
     boundary : tuple, optional
         boundaries of the box in which the coordinates are defined in the form
-        ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
+        ((zmin,zmax),(ymin,ymax),(xmin,xmax)). The default is the min and max
         value found in the coordinates along each axis.
     periodic_boundary : bool, optional
         whether the box has periodic boundary conditions. The default is False.
@@ -324,8 +324,8 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary=None,
     """
     #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
     coords.sort_index(inplace=True)
-    particles = coords[['x', 'y', 'z']].to_numpy()
-    queryparticles = coords.loc[sorted(query_indices)][['x', 'y', 'z']].to_numpy()
+    particles = coords[['z', 'y', 'x']].to_numpy()
+    queryparticles = coords.loc[sorted(query_indices)][['z', 'y', 'x']].to_numpy()
     
     #coefficient calculation in periodic boundary conditions
     if periodic_boundary:
@@ -511,8 +511,8 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
     coefficients : numpy.array of m by 3n*(len(times)-1)
         coefficient matrix of the full dataset as specified in [1]
     forces : numpy.array of length 3n*(len(times)-1)
-        vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
-        tn-1pnz]
+        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
+        tn-1pnx]
     G : numpy.array of length m
         discretized force vector, the result of the computation.
     G_err : numpy.array of length m
@@ -533,9 +533,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
     
     if boundary == None:
         boundary = (
-            (coordinates.x.min(),coordinates.x.max()),
+            (coordinates.z.min(),coordinates.z.max()),
             (coordinates.y.min(),coordinates.y.max()),
-            (coordinates.z.min(),coordinates.z.max())
+            (coordinates.x.min(),coordinates.x.max())
             )
     
     #initialize variables
@@ -555,12 +555,12 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                 raise ValueError('when remove_near_boundary=True, rmax cannot be more than half the smallest box dimension')
             
             selected = coords0.loc[(
-                (coords0['x']>=boundary[0][0]+rmax) &
-                (coords0['x']< boundary[0][1]-rmax) &
+                (coords0['z']>=boundary[0][0]+rmax) &
+                (coords0['z']< boundary[0][1]-rmax) &
                 (coords0['y']>=boundary[1][0]+rmax) &
                 (coords0['y']< boundary[1][1]-rmax) &
-                (coords0['z']>=boundary[2][0]+rmax) &
-                (coords0['z']< boundary[2][1]-rmax)
+                (coords0['x']>=boundary[2][0]+rmax) &
+                (coords0['x']< boundary[2][1]-rmax)
                 )].index
         else:
             selected = coords0.index
@@ -571,12 +571,12 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                 raise ValueError('when periodic_boundary=True, rmax cannot be more than half the smallest box dimension')
             if boundary==None:
                 raise ValueError('when periodic_boundary=True, boundary must be given')
-            mask = ((coords0['x'] < boundary[0][0]) & 
-                (coords0['x'] >= boundary[0][1]) & 
+            mask = ((coords0['z'] < boundary[0][0]) & 
+                (coords0['z'] >= boundary[0][1]) & 
                 (coords0['y'] < boundary[1][0]) & 
                 (coords0['y'] >= boundary[1][1]) & 
-                (coords0['z'] < boundary[2][0]) & 
-                (coords0['z'] >= boundary[2][1]))
+                (coords0['x'] < boundary[2][0]) & 
+                (coords0['x'] >= boundary[2][1]))
             if sum(mask) > 0:
                 print('\n[WARNING] trajectories_to_forces.run_overdamped: some'+
                       ' coordinates are outside of boundary and will be removed')
@@ -585,8 +585,8 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
 
         #calculate the force vector containin the total force acting on each particle
         f = _calculate_forces_overdamped(
-                coords0.loc[selected][['x','y','z']],
-                coords1[['x','y','z']],
+                coords0.loc[selected][['z','y','x']],
+                coords1[['z','y','x']],
                 t1-t0,
                 gamma=gamma,
                 periodic_boundary=periodic_boundary,
@@ -594,7 +594,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                 ).sort_index()
         
         #reshape f to 3n vector and add to total vector
-        f = f[['x','y','z']].to_numpy().ravel()
+        f = f[['z','y','x']].to_numpy().ravel()
         forces.append(f)
 
         #find neighbours and coefficients at time t0 for all particles present in t0 and t1
@@ -649,7 +649,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         list timestamps corresponding to the coordinates
     boundary : tuple, optional
         boundaries of the box in which the coordinates are defined in the form
-        ((xmin,xmax),(ymin,ymax),(zmin,zmax)). The default is the min and max
+        ((zmin,zmax),(ymin,ymax),(xmin,xmax)). The default is the min and max
         value found in the coordinates along each axis.
     mass : float, optional
         particle mass for calculation of F=m*a. The default is 1.
@@ -682,8 +682,8 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     coefficients : numpy.array of m by 3n*(len(times)-2)
         coefficient matrix of the full dataset as specified in [1]
     forces : numpy.array of length 3n*(len(times)-2)
-        vector of particle forces of form [t0p0x,t0p0y,t0p0z,t0p1x,t0p1y, ...,
-        tn-2pnz]
+        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
+        tn-2pnx]
     G : numpy.array of length m
         discretized force vector, the result of the computation.
     G_err : numpy.array of length m
@@ -719,12 +719,12 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                 raise ValueError('when remove_near_boundary=True, rmax cannot be more than half the smallest box dimension')
             
             selected = coords1.loc[(
-                (coords1['x']>=boundary[0][0]+rmax) &
-                (coords1['x']< boundary[0][1]-rmax) &
+                (coords1['z']>=boundary[0][0]+rmax) &
+                (coords1['z']< boundary[0][1]-rmax) &
                 (coords1['y']>=boundary[1][0]+rmax) &
                 (coords1['y']< boundary[1][1]-rmax) &
-                (coords1['z']>=boundary[2][0]+rmax) &
-                (coords1['z']< boundary[2][1]-rmax)
+                (coords1['x']>=boundary[2][0]+rmax) &
+                (coords1['x']< boundary[2][1]-rmax)
                 )].index
         else:
             selected = coords1.index
@@ -735,12 +735,12 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                 raise ValueError('when periodic_boundary=True, rmax cannot be more than half the smallest box dimension')
             if boundary==None:
                 raise ValueError('when periodic_boundary=True, boundary must be given')
-            mask = ((coords1['x'] < boundary[0][0]) & 
-                (coords1['x'] >= boundary[0][1]) & 
+            mask = ((coords1['z'] < boundary[0][0]) & 
+                (coords1['z'] >= boundary[0][1]) & 
                 (coords1['y'] < boundary[1][0]) & 
                 (coords1['y'] >= boundary[1][1]) & 
-                (coords1['z'] < boundary[2][0]) & 
-                (coords1['z'] >= boundary[2][1]))
+                (coords1['x'] < boundary[2][0]) & 
+                (coords1['x'] >= boundary[2][1]))
             if sum(mask) > 0:
                 print('\n[WARNING] trajectories_to_forces.run_overdamped: some'+
                       ' coordinates are outside of boundary and will be removed')
@@ -748,9 +748,9 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         
         #calculate the force vector containing the total force acting on each particle
         f = _calculate_forces_inertial(
-                coords0[['x','y','z']],
-                coords1.loc[selected][['x','y','z']],
-                coords2[['x','y','z']],
+                coords0[['z','y','x']],
+                coords1.loc[selected][['z','y','x']],
+                coords2[['z','y','x']],
                 (t2-t0)/2,
                 mass = mass,
                 periodic_boundary=periodic_boundary,
@@ -758,7 +758,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                 ).sort_index()
         
         #reshape f to 3n vector and append to total result
-        f = f[['x','y','z']].to_numpy().ravel()
+        f = f[['z','y','x']].to_numpy().ravel()
         forces.append(f)
         
         #find neighbours and coefficients 
