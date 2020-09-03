@@ -460,7 +460,7 @@ def load_forceprofile(filename):
 
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
                                 m=20,periodic_boundary=False,bruteforce=False,
-                                remove_near_boundary=True):
+                                remove_near_boundary=True,solve_per_dim=False):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -505,6 +505,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
         box of coordinates, and to prevent erroneous handling of particles
         which interact with other particles outside the measurement volume.
         Only possible when periodic_boundary=False. The default is True.
+    solve_per_dim : bool, optional
+        if True, the matrix is solved for each dimension separately, and a 
+        force vector and error are returned for each dimension.
 
     Returns
     -------
@@ -622,10 +625,23 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
     coefficients = coefficients[mask]
     forces = forces[mask]
     
-    #solve eq. 15 from the paper
-    #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
-    G,G_err,_,_ = np.linalg.lstsq(np.dot(coefficients.T,coefficients),np.dot(coefficients.T,forces),rcond=None)
-    G[counts==0] = np.nan
+    #solve eq. 15 from the paper in x, y and z separately
+    if solve_per_dim:
+        G = []
+        G_err = []
+        for dim in range(3):
+            coef = coefficients[dim::3]
+            G_dim,G_dim_err,_,_ = np.linalg.lstsq(np.dot(coef.T,coef),np.dot(coef.T,forces[dim::3]),rcond=None)
+            G_dim[counts==0] = np.nan
+            G.append(G_dim)
+            G_err.append(G_dim_err)
+        G,G_err = tuple(G),tuple(G_err)
+    
+    #solve eq. 15 from the paper for all dimensions together
+    else:
+        #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
+        G,G_err,_,_ = np.linalg.lstsq(np.dot(coefficients.T,coefficients),np.dot(coefficients.T,forces),rcond=None)
+        G[counts==0] = np.nan
     
     print('done')
     return coefficients,forces,G,G_err,counts
