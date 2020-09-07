@@ -555,7 +555,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,
         #find the particles which are far enough from boundary
         if remove_near_boundary:
             if rmax > min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2:
-                raise ValueError('when remove_near_boundary=True, rmax cannot be more than half the smallest box dimension')
+                raise ValueError(
+                    'when remove_near_boundary=True, rmax cannot be more than'+
+                    ' half the smallest box dimension. Use rmax < '+
+                    '{:}'.format(min(np.array(boundary)[:,1]-np.array(boundary)[:,0])/2)
+                )
             
             selected = coords0.loc[(
                 (coords0['z']>=boundary[0][0]+rmax) &
