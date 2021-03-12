@@ -589,8 +589,20 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
-    #get timestamps from coordinates
-    nt = len(times)
+    #check if one list or nested list, if not make it nested
+    if isinstance(times[0],list):
+        nested = True
+        nsteps = len(times)
+        
+        if not isinstance(coordinates[0],list):
+            raise ValueError('`coordinates` must be nested list if `times` is')
+        if len(coordinates) != nsteps:
+            raise ValueError('length of `times` and `coordinates` must match')
+        
+    else:
+        nested = False
+        times = [times]
+        coordinates = [coordinates]
     
     #get dimensionality from pos_cols, check names
     ndims = len(pos_cols)
@@ -601,87 +613,119 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             raise ValueError('when periodic_boundary=True, boundary must be given')
         boundary = [
             [
-                min([coord[dim].min() for coord in coordinates]),
-                max([coord[dim].max() for coord in coordinates])
-            ] for dim in pos_cols
-        
+                [
+                    min([c[dim].min() for c in coords]),
+                    max([c[dim].max() for c in coords])
+                ] for dim in pos_cols
+            ] for coords in coordinates
         ]
-    elif len(boundary) != ndims:
-        raise ValueError('number of pos_cols does not match boundary')
-    boundary = np.array(boundary)
-    
+        
+    #otherwise check inputs
+    elif nested:
+        if len(boundary) != nsteps:
+            raise ValueError('length of `boundary` and `coordinates` must match')
+        elif any([len(bounds) != ndims for bounds in boundary]):
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+    else:
+        boundary = [boundary]
+        
     #initialize variables
     forces = []
     coefficients = []
     counts = []
     
-    #loop over all sets of two particles
-    for i,((coords0,t0),(coords1,t1)) in enumerate(_nwise(zip(coordinates,times),n=2)):
+    #loop over separate sets of coordinates
+    for i,(coords,bounds,tsteps) in enumerate(zip(coordinates,boundary,times)):
+    
+        #set boundaries, get number of timestep
+        bounds = np.array(bounds)
+        nt = len(tsteps)
         
-        #print progress
-        print('\revaluating time interval {:.5f} to {:.5f} (step {:d} of {:d})'.format(t0,t1,i+1,nt-1),end='',flush=True)
-        
-        #find the particles which are far enough from boundary
-        if remove_near_boundary:
-            if rmax > min(boundary[:,1]-boundary[:,0])/2:
-                raise ValueError(
-                    'when remove_near_boundary=True, rmax cannot be more than'+
-                    ' half the smallest box dimension. Use rmax < '+
-                    '{:}'.format(min(boundary[:,1]-boundary[:,0])/2)
-                )
+        #loop over all sets of two particles
+        for j,((coords0,t0),(coords1,t1)) in \
+            enumerate(_nwise(zip(coords,tsteps),n=2)):
             
-            selected = coords0.loc[(
-                (coords0[pos_cols] >= boundary[:,0]+rmax).all(axis=1) &
-                (coords0[pos_cols] <  boundary[:,1]-rmax).all(axis=1)
-            )].index
+            #print progress
+            if nested:
+                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '+
+                       '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-1,
+                                                    t0,t1),end='',flush=True)
+            else:
+                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '+
+                       '{:.5f})').format(j+1,nt-1,t0,t1),end='',flush=True)
             
-        else:
-            selected = coords0.index
-        
-        #check inputs
-        if periodic_boundary:
-            if rmax > min(boundary[:,1]-boundary[:,0])/2:
-                raise ValueError('when periodic_boundary=True, rmax cannot be more than half the smallest box dimension')
+            #find the particles which are far enough from boundary
+            if remove_near_boundary:
+                if rmax > min(bounds[:,1]-bounds[:,0])/2:
+                    raise ValueError(
+                        'when remove_near_boundary=True, rmax cannot be more '+
+                        'than half the smallest box dimension. Use rmax < '+
+                        '{:}'.format(min(bounds[:,1]-bounds[:,0])/2)
+                    )
+                
+                selected = coords0.loc[(
+                    (coords0[pos_cols] >= bounds[:,0]+rmax).all(axis=1) &
+                    (coords0[pos_cols] <  bounds[:,1]-rmax).all(axis=1)
+                )].index
+                
+            else:
+                selected = coords0.index
             
-            #remove any items outside of boundaries
-            mask = (coords0[pos_cols] < boundary[:,0]).any(axis=1) | \
-                (coords0[pos_cols] >= boundary[:,1]).any(axis=1)
-            if mask.any():
-                print('\n[WARNING] trajectories_to_forces.run_overdamped: some'+
-                      ' coordinates are outside of boundary and will be removed')
-                coords0 = coords0.loc[~mask]
-                    
-
-        #calculate the force vector containin the total force acting on each particle
-        f = _calculate_forces_overdamped(
-                coords0.loc[selected],
-                coords1,
-                t1-t0,
-                boundary,
-                pos_cols,
-                gamma=gamma,
-                periodic_boundary=periodic_boundary,
-            ).sort_index()
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bounds[:,1]-bounds[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '+
+                        'cannot be more than half the smallest box dimension')
+                
+                #remove any items outside of boundaries
+                mask = (coords0[pos_cols] < bounds[:,0]).any(axis=1) | \
+                    (coords0[pos_cols] >= bounds[:,1]).any(axis=1)
+                if mask.any():
+                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'+
+                          ' some coordinates are outside of boundary and will'+
+                          ' be removed')
+                    coords0 = coords0.loc[~mask]
+                        
+    
+            #calculate the force vector containin the total force acting on 
+            #each particle
+            f = _calculate_forces_overdamped(
+                    coords0.loc[selected],
+                    coords1,
+                    t1-t0,
+                    bounds,
+                    pos_cols,
+                    gamma=gamma,
+                    periodic_boundary=periodic_boundary,
+                ).sort_index()
+            
+            #reshape f to 3n vector and add to total vector
+            f = f[pos_cols].to_numpy().ravel()
+            forces.append(f)
+    
+            #find neighbours and coefficients at time t0 for all particles 
+            #present in t0 and t1
+            C,c = _calculate_coefficients(
+                    coords0.loc[set(coords0.index).intersection(coords1.index)],
+                    set(selected).intersection(coords1.index),
+                    rmax,
+                    m,
+                    bounds,
+                    pos_cols,
+                    bruteforce=bruteforce,
+                    periodic_boundary=periodic_boundary,
+                    )
+            coefficients.append(C)
+            counts.append(c)
         
-        #reshape f to 3n vector and add to total vector
-        f = f[pos_cols].to_numpy().ravel()
-        forces.append(f)
-
-        #find neighbours and coefficients at time t0 for all particles present in t0 and t1
-        C,c = _calculate_coefficients(
-                coords0.loc[set(coords0.index).intersection(coords1.index)],
-                set(selected).intersection(coords1.index),
-                rmax,
-                m,
-                boundary,
-                pos_cols,
-                bruteforce=bruteforce,
-                periodic_boundary=periodic_boundary,
-                )
-        coefficients.append(C)
-        counts.append(c)
-        
-    print('\nsolving matrix equation')
+        #newline between steps
+        if nested:
+            print()
+    
+    if nested:
+        print('solving matrix equation')
+    else:
+        print('\nsolving matrix equation')
 
     #create one big array of coefficients and one of forces
     coefficients = np.concatenate(coefficients,axis=0)
@@ -699,7 +743,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         G_err = []
         for dim in range(ndims):
             coef = coefficients[dim::ndims]
-            G_dim,G_dim_err,_,_ = np.linalg.lstsq(np.dot(coef.T,coef),np.dot(coef.T,forces[dim::ndims]),rcond=None)
+            G_dim,G_dim_err,_,_ = np.linalg.lstsq(
+                np.dot(coef.T,coef),
+                np.dot(coef.T,forces[dim::ndims]),
+                rcond=None
+            )
             G_dim[counts==0] = np.nan
             G.append(G_dim)
             G_err.append(G_dim_err)
@@ -708,7 +756,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     #solve eq. 15 from the paper for all dimensions together
     else:
         #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
-        G,G_err,_,_ = np.linalg.lstsq(np.dot(coefficients.T,coefficients),np.dot(coefficients.T,forces),rcond=None)
+        G,G_err,_,_ = np.linalg.lstsq(
+            np.dot(coefficients.T,coefficients),
+            np.dot(coefficients.T,forces),
+            rcond=None
+        )
         G[counts==0] = np.nan
     
     print('done')
