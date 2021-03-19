@@ -848,97 +848,140 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     11(35), 6948–6956. https://doi.org/10.1039/C5SM01233C
     """
     
-    #get dimensionality from pos_cols
+    #check if one list or nested list, if not make it nested
+    if isinstance(times[0],list):
+        nested = True
+        nsteps = len(times)
+        
+        if not isinstance(coordinates[0],list):
+            raise ValueError('`coordinates` must be nested list if `times` is')
+        if len(coordinates) != nsteps:
+            raise ValueError('length of `times` and `coordinates` must match')
+        
+    else:
+        nested = False
+        times = [times]
+        coordinates = [coordinates]
+    
+    #get dimensionality from pos_cols, check names
     ndims = len(pos_cols)
     
     #get default boundaries from min and max values in any coordinate set
-    if boundary == None:
+    if type(boundary) == type(None):
         if periodic_boundary:
-            raise ValueError('when periodic_boundary=True, boundary must be given')
+            raise ValueError('when periodic_boundary=True, boundary must be '+
+                             'given')
         boundary = [
             [
-                min([coord[dim].min() for coord in coordinates]),
-                max([coord[dim].max() for coord in coordinates])
-            ] for dim in pos_cols
-        
+                [
+                    min([c[dim].min() for c in coords]),
+                    max([c[dim].max() for c in coords])
+                ] for dim in pos_cols
+            ] for coords in coordinates
         ]
-    elif len(boundary) != ndims:
-        raise ValueError('number of pos_cols does not match boundary')
-    boundary = np.array(boundary)
-    
-    #initialize list to put results into
-    nt = len(times)
+        
+    #otherwise check inputs
+    elif nested:
+        if len(boundary) != nsteps:
+            raise ValueError('length of `boundary` and `coordinates` must '+
+                             'match')
+        elif any([len(bounds) != ndims for bounds in boundary]):
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+    else:
+        boundary = [boundary]
+        
+    #initialize variables
     forces = []
     coefficients = []
     counts = []
     
-    #loop over triplets of time steps, i.e. (t0,t1,t2),(t1,t2,t3),(t2,t3,t4), ..., (tn-2,tn-1,tn)
-    print('starting calculation')
-    for i,((coords0,t0),(coords1,t1),(coords2,t2)) in enumerate(_nwise(zip(coordinates,times),n=3)):
-        
-        #print progress
-        print('\revaluating time interval {:.3f} to {:.3f} (step {:d} of {:d})'.format(t0,t2,i+1,nt-2),end='',flush=True)
-        
-        #find the particles which are far enough from boundary
-        if remove_near_boundary:
-            if rmax > min(boundary[:,1]-boundary[:,0])/2:
-                raise ValueError(
-                    'when remove_near_boundary=True, rmax cannot be more than'+
-                    ' half the smallest box dimension. Use rmax < '+
-                    '{:}'.format(min(boundary[:,1]-boundary[:,0])/2)
-                )
-            selected = coords0.loc[(
-                (coords0[pos_cols] >= boundary[:,0]+rmax).all(axis=1) &
-                (coords0[pos_cols] <  boundary[:,1]-rmax).all(axis=1)
-            )].index
-        
-        #otherwise take all particles
-        else:
-            selected = coords1.index
-        
-        #check inputs
-        if periodic_boundary:
-            if rmax > min(boundary[:,1]-boundary[:,0])/2:
-                raise ValueError('when periodic_boundary=True, rmax cannot be'+
-                                 ' more than half the smallest box dimension')
-
-            #remove any items outside of boundaries
-            mask = (coords1[pos_cols] < boundary[:,0]).any(axis=1) | \
-                (coords1[pos_cols] >= boundary[:,1]).any(axis=1)
-            if mask.any():
-                print('\n[WARNING] trajectories_to_forces.run_inertial: some'+
-                      ' coordinates are outside of boundary and will be removed')
-                coords1 = coords1.loc[~mask]
-        
-        #calculate the force vector containing the total force acting on each particle
-        f = _calculate_forces_inertial(
-                coords0[pos_cols],
-                coords1.loc[selected],
-                coords2,
-                (t2-t0)/2,
-                boundary,
+    #loop over separate sets of coordinates
+    for i,(coords,bounds,tsteps) in enumerate(zip(coordinates,boundary,times)):
+    
+        #set boundaries, get number of timestep
+        bounds = np.array(bounds)
+        nt = len(tsteps)
+    
+        #loop over triplets of time steps, i.e. (t0,t1,t2),(t1,t2,t3),
+        #   (t2,t3,t4), ..., (tn-2,tn-1,tn)
+        print('starting calculation')
+        for j,((coords0,t0),(coords1,t1),(coords2,t2)) in \
+            enumerate(_nwise(zip(coords,tsteps),n=3)):
+            
+            #print progress
+            if nested:
+                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '+
+                       '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-2,
+                                                    t0,t2),end='',flush=True)
+            else:
+                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '+
+                       '{:.5f})').format(j+1,nt-2,t0,t2),end='',flush=True)
+            
+            #find the particles which are far enough from boundary
+            if remove_near_boundary:
+                if rmax > min(bounds[:,1]-bounds[:,0])/2:
+                    raise ValueError(
+                        'when remove_near_boundary=True, rmax cannot be more '+
+                        'than half the smallest box dimension. Use rmax < '+
+                        '{:}'.format(min(bounds[:,1]-bounds[:,0])/2)
+                    )
+                selected = coords1.loc[(
+                    (coords1[pos_cols] >= bounds[:,0]+rmax).all(axis=1) &
+                    (coords1[pos_cols] <  bounds[:,1]-rmax).all(axis=1)
+                )].index
+            
+            #otherwise take all particles
+            else:
+                selected = coords1.index
+            
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bounds[:,1]-bounds[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '+
+                                     'cannot be more than half the smallest '+
+                                     'box dimension')
+    
+                #remove any items outside of boundaries
+                mask = (coords1[pos_cols] < bounds[:,0]).any(axis=1) | \
+                    (coords1[pos_cols] >= bounds[:,1]).any(axis=1)
+                if mask.any():
+                    print('\n[WARNING] trajectories_to_forces.run_inertial: '+
+                          'some coordinates are outside of boundary and will '+
+                          'be removed')
+                    coords1 = coords1.loc[~mask]
+            
+            #calculate the force vector containing the total force acting on 
+            #each particle
+            f = _calculate_forces_inertial(
+                    coords0[pos_cols],
+                    coords1.loc[selected],
+                    coords2,
+                    (t2-t0)/2,
+                    bounds,
+                    pos_cols,
+                    mass = mass,
+                    periodic_boundary=periodic_boundary
+                ).sort_index()
+            
+            #reshape f to 3n vector and append to total result
+            f = f[pos_cols].to_numpy().ravel()
+            forces.append(f)
+            
+            #find neighbours and coefficients 
+            C,c = _calculate_coefficients(
+                coords1.loc[set(coords1.index).intersection(
+                    coords0.index).intersection(coords2.index)],
+                set(selected).intersection(coords0.index).intersection(
+                    coords2.index),
+                rmax,
+                m,
+                bounds,
                 pos_cols,
-                mass = mass,
-                periodic_boundary=periodic_boundary
-            ).sort_index()
-        
-        #reshape f to 3n vector and append to total result
-        f = f[pos_cols].to_numpy().ravel()
-        forces.append(f)
-        
-        #find neighbours and coefficients 
-        C,c = _calculate_coefficients(
-            coords1.loc[set(coords1.index).intersection(coords0.index).intersection(coords2.index)],
-            set(selected).intersection(coords0.index).intersection(coords2.index),
-            rmax,
-            m,
-            boundary,
-            pos_cols,
-            bruteforce=bruteforce,
-            periodic_boundary=periodic_boundary,
-        )
-        coefficients.append(C)
-        counts.append(c)
+                bruteforce=bruteforce,
+                periodic_boundary=periodic_boundary,
+            )
+            coefficients.append(C)
+            counts.append(c)
         
     print('\nsolving matrix equation')
 
@@ -953,7 +996,11 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         G_err = []
         for dim in range(ndims):
             coef = coefficients[dim::ndims]
-            G_dim,G_dim_err,_,_ = np.linalg.lstsq(np.dot(coef.T,coef),np.dot(coef.T,forces[dim::ndims]),rcond=None)
+            G_dim,G_dim_err,_,_ = np.linalg.lstsq(
+                np.dot(coef.T,coef),
+                np.dot(coef.T,forces[dim::ndims]),
+                rcond=None
+            )
             G_dim[counts==0] = np.nan
             G.append(G_dim)
             G_err.append(G_dim_err)
@@ -962,7 +1009,11 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     #solve eq. 15 from the paper for all dimensions together
     else:
         #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
-        G,G_err,_,_ = np.linalg.lstsq(np.dot(coefficients.T,coefficients),np.dot(coefficients.T,forces),rcond=None)
+        G,G_err,_,_ = np.linalg.lstsq(
+            np.dot(coefficients.T,coefficients),
+            np.dot(coefficients.T,forces),
+            rcond=None
+        )
         G[counts==0] = np.nan
 
     return C,f,G,G_err,counts
