@@ -507,9 +507,9 @@ def load_forceprofile(filename):
     return rvals,forces,counts,rsteps,rmax
 
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
-                   pos_cols=['z','y','x'],periodic_boundary=False,
-                   bruteforce=False,remove_near_boundary=True,
-                   solve_per_dim=False):
+                   pos_cols=['z','y','x'],eval_particles=None,
+                   periodic_boundary=False,bruteforce=False,
+                   remove_near_boundary=True,solve_per_dim=False):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -598,11 +598,23 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             raise ValueError('`coordinates` must be nested list if `times` is')
         if len(coordinates) != nsteps:
             raise ValueError('length of `times` and `coordinates` must match')
+        if not eval_particles is None:
+            if any(isinstance(ep,list) for ep in eval_particles):
+                if len(eval_particles) != nsteps:
+                    raise ValueError('length of `times` and `eval_particles'+
+                                     ' must match')
+            elif len(eval_particles)!=nsteps or \
+                any(not ep is None for ep in eval_particles):
+                eval_particles = [eval_particles]*nsteps
+        else:
+            eval_particles = [None]*nsteps
+                     
         
     else:
         nested = False
         times = [times]
         coordinates = [coordinates]
+        eval_particles = [eval_particles]
     
     #get dimensionality from pos_cols, check names
     ndims = len(pos_cols)
@@ -635,11 +647,17 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     counts = []
     
     #loop over separate sets of coordinates
-    for i,(coords,bounds,tsteps) in enumerate(zip(coordinates,boundary,times)):
+    for i,(coords,bounds,tsteps,eval_parts) in \
+        enumerate(zip(coordinates,boundary,times,eval_particles)):
     
         #set boundaries, get number of timestep
         bounds = np.array(bounds)
         nt = len(tsteps)
+        
+        #check data
+        if nt != len(coords):
+            raise ValueError('length of timesteps does not match coordinate '+
+                             'data')
         
         #loop over all sets of two particles
         for j,((coords0,t0),(coords1,t1)) in \
@@ -670,6 +688,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                 
             else:
                 selected = coords0.index
+            
+            if not eval_parts is None:
+                selected = selected.intersection(set(eval_parts))
             
             #check inputs
             if periodic_boundary:
