@@ -113,12 +113,15 @@ def _calculate_forces_overdamped(coords0,coords1,dt,boundary,pos_cols,gamma=1,
             forces[col+'0'] = coords0[col]
             forces[col+'1'] = coords1[col]
             
-            forces[col] = forces.apply(lambda x: _calculate_displacement_periodic(
+            forces[col] = forces.apply(
+                lambda x: _calculate_displacement_periodic(
                     x[col+'0'],
                     x[col+'1'],
                     colmin,
                     colmax
-                    ),axis=1)
+                ),
+                axis=1
+            )
         
         return forces[cols].dropna()*gamma/dt
     else:
@@ -458,8 +461,13 @@ def save_forceprofile(
         file.write('r\tforce\tcounts\n')
 
         #write table
-        for i,r in enumerate(np.linspace(0+rmax/2/rsteps,rmax+rmax/2/rsteps,rsteps,endpoint=False)):
-            file.write('{:.3f}\t{:5f}\t{:d}\n'.format(r,forces[i],int(counts[i])))
+        for i,r in enumerate(np.linspace(
+                0+rmax/2/rsteps,
+                rmax+rmax/2/rsteps,
+                rsteps,
+                endpoint=False
+            )):
+            file.write(f'{r:.3f}\t{forces[i]:5f}\t{int(counts[i]):d}\n')
 
     print('saved results as "'+filename+'"')
 
@@ -507,7 +515,7 @@ def load_forceprofile(filename):
     return rvals,forces,counts,rsteps,rmax
 
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
-                   pos_cols=['z','y','x'],eval_particles=None,
+                   pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
                    remove_near_boundary=True,solve_per_dim=False):
     """
@@ -620,9 +628,10 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     ndims = len(pos_cols)
     
     #get default boundaries from min and max values in any coordinate set
-    if type(boundary) == type(None):
+    if boundary is None:
         if periodic_boundary:
-            raise ValueError('when periodic_boundary=True, boundary must be given')
+            raise ValueError('when periodic_boundary=True, boundary must be '+
+                             'given')
         boundary = [
             [
                 [
@@ -635,7 +644,8 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     #otherwise check inputs
     elif nested:
         if len(boundary) != nsteps:
-            raise ValueError('length of `boundary` and `coordinates` must match')
+            raise ValueError('length of `boundary` and `coordinates` must '+
+                             'match')
         elif any([len(bounds) != ndims for bounds in boundary]):
             raise ValueError('number of `pos_cols` does not match `boundary`')
     else:
@@ -888,7 +898,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     ndims = len(pos_cols)
     
     #get default boundaries from min and max values in any coordinate set
-    if type(boundary) == type(None):
+    if boundary is None:
         if periodic_boundary:
             raise ValueError('when periodic_boundary=True, boundary must be '+
                              'given')
