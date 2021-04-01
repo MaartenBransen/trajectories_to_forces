@@ -646,16 +646,16 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 
     """
     #check if one list or nested list, if not make it nested
-    if isinstance(times[0],list):
+    if isinstance(times[0],(list,np.array)):
         nested = True
         nsteps = len(times)
         
-        if not isinstance(coordinates[0],list):
+        if not isinstance(coordinates[0],(list,np.array)):
             raise ValueError('`coordinates` must be nested list if `times` is')
         if len(coordinates) != nsteps:
             raise ValueError('length of `times` and `coordinates` must match')
         if not eval_particles is None:
-            if any(isinstance(ep,list) for ep in eval_particles):
+            if any(isinstance(ep,(list,set,np.array)) for ep in eval_particles):
                 if len(eval_particles) != nsteps:
                     raise ValueError('length of `times` and `eval_particles'+
                                      ' must match')
@@ -673,6 +673,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         eval_particles = [eval_particles]
     
     #get dimensionality from pos_cols, check names
+    pos_cols = list(pos_cols)
     ndims = len(pos_cols)
     
     #get default boundaries from min and max values in any coordinate set
@@ -691,12 +692,18 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         
     #otherwise check inputs
     elif nested:
-        if len(boundary) != nsteps:
+        #if single boundary set given, make list of boundary
+        if np.array(boundary).ndim == 2:
+            boundary = [boundary]*nsteps
+        #else check len
+        elif len(boundary) != nsteps:
             raise ValueError('length of `boundary` and `coordinates` must '+
                              'match')
-        elif any([len(bounds) != ndims for bounds in boundary]):
+        if any([len(bounds) != ndims for bounds in boundary]):
             raise ValueError('number of `pos_cols` does not match `boundary`')
     else:
+        if len(boundary) != ndims:
+            raise ValueError('number of `pos_cols` does not match `boundary`')
         boundary = [boundary]
         
     #initialize variables
