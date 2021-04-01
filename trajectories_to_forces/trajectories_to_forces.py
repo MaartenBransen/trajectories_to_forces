@@ -514,6 +514,54 @@ def load_forceprofile(filename):
 
     return rvals,forces,counts,rsteps,rmax
 
+def filter_stationary(coordinates, pos_cols=('z','y','x'),threshold=0.01):
+    """calculates the squared displacement between subsequent frames for each
+    particle individually, meaned over all intervals, and filters the indices
+    by some threshold displacement
+    
+    Parameters
+    ----------
+    coordinates : list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep. Must be
+        indexed by particle (with each particle having a unique identifyer that
+        matches between different time steps) and contain coordinates along 
+        each dimension in a separate column, with column names matching those 
+        given in `pos_cols`.
+    pos_cols : tuple of str, optional
+        names of the columns of the DataFrames in `coordinates` containing the
+        particle coordinates along each dimension. The length (i.e. number of
+        dimensions) must match len(boundary) and the number of columns in 
+        `coordinates`. The default is `('z','y','x')`.
+    threshold : float, optional
+        Threshold value for the mean squared displacement between two 
+        subsequent time steps below which a particle is considered stationary. 
+        The default is 0.01.
+
+    Returns
+    -------
+    indices : set
+        particle identifiers for the particles which are NOT considered 
+        stationary, i.e. those whose MSD is LARGER than the threshold.
+    msds : list of float
+        full list of the MSD values for all particles in all timesteps, useful
+        e.g. for plotting a histogram to estimate a value for `threshold`.
+    """
+    
+    indices = []
+    msds = []
+    
+    for coord in coordinates:
+        sd = []
+        for i,(coord0,coord1) in enumerate(_nwise(coord)):
+            sd.append(sum([(coord0[col]-coord1[col])**2 for col in pos_cols]))
+        sd = pd.concat(sd,axis=1)
+        msd = sd.mean(axis=1,skipna=True)
+        mask = (msd > threshold) & ~np.isnan(msd)
+        msds.extend(msd)
+        indices.append(set(mask.loc[mask].index))
+    
+    return indices,msds
+
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
@@ -550,11 +598,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         The number of discretization steps for the force profile, i.e. the
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
-    pos_cols : list of str, optional
+    pos_cols : tuple of str, optional
         names of the columns of the DataFrames in `coordinates` containing the
         particle coordinates along each dimension. The length (i.e. number of
         dimensions) must match len(boundary) and the number of columns in 
-        `coordinates`. The default is `['z','y','x'].
+        `coordinates`. The default is `('z','y','x')`.
     periodic_boundary : bool, optional
         Whether the box has periodic boundary conditions. If True, the boundary
         must be given. The default is False.
