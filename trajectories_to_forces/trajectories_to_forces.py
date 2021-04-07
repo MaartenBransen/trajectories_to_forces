@@ -646,16 +646,16 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 
     """
     #check if one list or nested list, if not make it nested
-    if isinstance(times[0],(list,np.array)):
+    if isinstance(times[0],(list,np.ndarray)):
         nested = True
         nsteps = len(times)
         
-        if not isinstance(coordinates[0],(list,np.array)):
+        if not isinstance(coordinates[0],(list,np.ndarray)):
             raise ValueError('`coordinates` must be nested list if `times` is')
         if len(coordinates) != nsteps:
             raise ValueError('length of `times` and `coordinates` must match')
         if not eval_particles is None:
-            if any(isinstance(ep,(list,set,np.array)) for ep in eval_particles):
+            if any(isinstance(ep,(list,set,np.ndarray)) for ep in eval_particles):
                 if len(eval_particles) != nsteps:
                     raise ValueError('length of `times` and `eval_particles'+
                                      ' must match')
