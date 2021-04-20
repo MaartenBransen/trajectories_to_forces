@@ -514,19 +514,22 @@ def load_forceprofile(filename):
 
     return rvals,forces,counts,rsteps,rmax
 
-def filter_stationary(coordinates, pos_cols=('z','y','x'),threshold=0.01):
+def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
+                      msd_min=0.01, msd_max=1):
     """calculates the squared displacement between subsequent frames for each
     particle individually, meaned over all intervals, and filters the indices
     by some threshold displacement
     
     Parameters
     ----------
-    coordinates : list of pandas.DataFrame
+    coordinates : list of list of pandas.DataFrame
         A pandas dataframe containing coordinates for each timestep. Must be
         indexed by particle (with each particle having a unique identifyer that
         matches between different time steps) and contain coordinates along 
         each dimension in a separate column, with column names matching those 
         given in `pos_cols`.
+    times : list, optional
+        timestamps for the sets of coordinates
     pos_cols : tuple of str, optional
         names of the columns of the DataFrames in `coordinates` containing the
         particle coordinates along each dimension. The length (i.e. number of
@@ -546,20 +549,43 @@ def filter_stationary(coordinates, pos_cols=('z','y','x'),threshold=0.01):
         full list of the MSD values for all particles in all timesteps, useful
         e.g. for plotting a histogram to estimate a value for `threshold`.
     """
+    #default min and max
+    if msd_min is None:
+        msd_min = 0
+    if msd_max is None:
+        msd_max = np.inf
     
+    #init lists
     indices = []
     msds = []
     
-    for coord in coordinates:
-        sd = []
-        for i,(coord0,coord1) in enumerate(_nwise(coord)):
-            sd.append(sum([(coord0[col]-coord1[col])**2 for col in pos_cols]))
-        sd = pd.concat(sd,axis=1)
-        msd = sd.mean(axis=1,skipna=True)
-        mask = (msd > threshold) & ~np.isnan(msd)
-        msds.extend(msd)
-        indices.append(set(mask.loc[mask].index))
+    #in case of no timesteps return squared displacement
+    if times is None:
+        for coord in coordinates:
+            sd = []
+            for i,(coord0,coord1) in enumerate(_nwise(coord)):
+                sd.append(sum([(coord0[col]-coord1[col])**2 \
+                               for col in pos_cols]))
+            sd = pd.concat(sd,axis=1)
+            msd = sd.mean(axis=1,skipna=True)
+            mask = (msd_min <= msd) & (msd < msd_max) & ~np.isnan(msd)
+            msds.extend(msd)
+            indices.append(set(mask.loc[mask].index))
     
+    #when using timesteps return squared displacement  / dt
+    else:
+        for time,coord in zip(times,coordinates):
+            sd = []
+            for i,((coord0,t0),(coord1,t1)) \
+                in enumerate(_nwise(zip(coord,time))):
+                sd.append(sum([(coord0[col]-coord1[col])**2/(t1-t0) \
+                               for col in pos_cols]))
+            sd = pd.concat(sd,axis=1)
+            msd = sd.mean(axis=1,skipna=True)
+            mask = (msd_min <= msd) & (msd < msd_max) & ~np.isnan(msd)
+            msds.extend(msd)
+            indices.append(set(mask.loc[mask].index))
+        
     return indices,msds
 
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
