@@ -3,7 +3,7 @@
 import pandas as pd
 import numpy as np
 from scipy.spatial import cKDTree
-from itertools import tee,islice
+from itertools import tee,islice,repeat
 import numba as nb
 
 #%% private definitions
@@ -683,13 +683,13 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         if not eval_particles is None:
             if any(isinstance(ep,(list,set,np.ndarray)) for ep in eval_particles):
                 if len(eval_particles) != nsteps:
-                    raise ValueError('length of `times` and `eval_particles'+
+                    raise ValueError('length of `times` and `eval_particles'
                                      ' must match')
             elif len(eval_particles)!=nsteps or \
                 any(not ep is None for ep in eval_particles):
-                eval_particles = [eval_particles]*nsteps
+                eval_particles = repeat(eval_particles)
         else:
-            eval_particles = [None]*nsteps
+            eval_particles = repeat(None)
                      
         
     else:
@@ -705,32 +705,60 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     #get default boundaries from min and max values in any coordinate set
     if boundary is None:
         if periodic_boundary:
-            raise ValueError('when periodic_boundary=True, boundary must be '+
+            raise ValueError('when periodic_boundary=True, boundary must be '
                              'given')
         boundary = [
             [
-                [
+                repeat([
                     min([c[dim].min() for c in coords]),
                     max([c[dim].max() for c in coords])
-                ] for dim in pos_cols
+                ]) for dim in pos_cols
             ] for coords in coordinates
         ]
         
     #otherwise check inputs
     elif nested:
-        #if single boundary set given, make list of boundary
-        if np.array(boundary).ndim == 2:
-            boundary = [boundary]*nsteps
-        #else check len
+        #if single boundary for whole set given, make boundary iterable on a 
+        #per timestep per coordinate set basis
+        if np.array(boundary[0]).ndim == 1:
+            if len(boundary) != ndims:
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = repeat(repeat(boundary))
+        
+        #else check if length matches
         elif len(boundary) != nsteps:
-            raise ValueError('length of `boundary` and `coordinates` must '+
+            raise ValueError('length of `boundary` and `coordinates` must '
                              'match')
-        if any([len(bounds) != ndims for bounds in boundary]):
+        
+        #if single boundary per coordinate set given
+        elif np.array(boundary[0]).ndim == 2:
+            #check dimensionality of each item
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            #make iterable on a per timestep basis
+            boundary = [repeat(bounds) for bounds in boundary]
+            
+        #if boundary for each timestep check lengths and dimensionality
+        elif any([len(bounds) != len(time) \
+                  for bounds,time in zip(boundary,times)]):
+            raise ValueError('number of items in each item in `boundary` must '
+                             'match that in `times`')
+        elif any([np.array(bounds).shape[1] != ndims for bounds in boundary]):
             raise ValueError('number of `pos_cols` does not match `boundary`')
+    
+    #if not nested, make nested with single item per list for later iterating
     else:
-        if len(boundary) != ndims:
+        if np.array(boundary[0]).ndim == 2:
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = [boundary]
+        elif len(boundary) != ndims:
             raise ValueError('number of `pos_cols` does not match `boundary`')
-        boundary = [boundary]
+        else:
+            boundary = [repeat(boundary)]
         
     #initialize variables
     forces = []
@@ -741,40 +769,42 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     for i,(coords,bounds,tsteps,eval_parts) in \
         enumerate(zip(coordinates,boundary,times,eval_particles)):
     
-        #set boundaries, get number of timestep
-        bounds = np.array(bounds)
+        #get number of timestep
         nt = len(tsteps)
         
         #check data
         if nt != len(coords):
-            raise ValueError('length of timesteps does not match coordinate '+
+            raise ValueError('length of timesteps does not match coordinate '
                              'data')
         
         #loop over all sets of two particles
-        for j,((coords0,t0),(coords1,t1)) in \
-            enumerate(_nwise(zip(coords,tsteps),n=2)):
+        for j,((coords0,bound0,t0),(coords1,_,t1)) in \
+            enumerate(_nwise(zip(coords,bounds,tsteps),n=2)):
             
             #print progress
             if nested:
-                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '+
+                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '
                        '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-1,
                                                     t0,t1),end='',flush=True)
             else:
-                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '+
+                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '
                        '{:.5f})').format(j+1,nt-1,t0,t1),end='',flush=True)
+            
+            #assure boundary is array
+            bound0 = np.array(bound0)
             
             #find the particles which are far enough from boundary
             if remove_near_boundary:
-                if rmax > min(bounds[:,1]-bounds[:,0])/2:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
                     raise ValueError(
-                        'when remove_near_boundary=True, rmax cannot be more '+
-                        'than half the smallest box dimension. Use rmax < '+
-                        '{:}'.format(min(bounds[:,1]-bounds[:,0])/2)
+                        'when remove_near_boundary=True, rmax cannot be more '
+                        'than half the smallest box dimension. Use rmax < '
+                        '{:}'.format(min(bound0[:,1]-bound0[:,0])/2)
                     )
                 
                 selected = coords0.loc[(
-                    (coords0[pos_cols] >= bounds[:,0]+rmax).all(axis=1) &
-                    (coords0[pos_cols] <  bounds[:,1]-rmax).all(axis=1)
+                    (coords0[pos_cols] >= bound0[:,0]+rmax).all(axis=1) &
+                    (coords0[pos_cols] <  bound0[:,1]-rmax).all(axis=1)
                 )].index
                 
             else:
@@ -785,16 +815,16 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             
             #check inputs
             if periodic_boundary:
-                if rmax > min(bounds[:,1]-bounds[:,0])/2:
-                    raise ValueError('when periodic_boundary=True, rmax '+
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '
                         'cannot be more than half the smallest box dimension')
                 
                 #remove any items outside of boundaries
-                mask = (coords0[pos_cols] < bounds[:,0]).any(axis=1) | \
-                    (coords0[pos_cols] >= bounds[:,1]).any(axis=1)
+                mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
+                    (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
                 if mask.any():
-                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'+
-                          ' some coordinates are outside of boundary and will'+
+                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'
+                          ' some coordinates are outside of boundary and will'
                           ' be removed')
                     coords0 = coords0.loc[~mask]
                         
@@ -805,7 +835,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                     coords0.loc[selected],
                     coords1,
                     t1-t0,
-                    bounds,
+                    bound0,
                     pos_cols,
                     gamma=gamma,
                     periodic_boundary=periodic_boundary,
@@ -822,7 +852,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                     set(selected).intersection(coords1.index),
                     rmax,
                     m,
-                    bounds,
+                    bound0,
                     pos_cols,
                     bruteforce=bruteforce,
                     periodic_boundary=periodic_boundary,
