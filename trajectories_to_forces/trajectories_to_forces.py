@@ -591,7 +591,8 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
-                   remove_near_boundary=True,solve_per_dim=False):
+                   remove_near_boundary=True,solve_per_dim=False,
+                   return_data = False):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -648,14 +649,13 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     solve_per_dim : bool, optional
         if True, the matrix is solved for each dimension separately, and a 
         force vector and error are returned for each dimension.
+    return_data : bool, optional
+        If True, the full coefficient matrix and force vector are returned 
+        together with the force vector, error and the list of bincounts. The
+        default is False.
 
     Returns
     -------
-    coefficients : numpy.array of m by 3n*(len(times)-1)
-        coefficient matrix of the full dataset as specified in [1]
-    forces : numpy.array of length 3n*(len(times)-1)
-        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
-        tn-1pnx]
     G : numpy.array of length m
         discretized force vector, the result of the computation.
     G_err : numpy.array of length m
@@ -663,6 +663,12 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     counts : numpy.array of length m
         number of individual force evaluations contributing to the result in
         each bin.
+    coefficients : numpy.array of m by 3n*(len(times)-1)
+        coefficient matrix of the full dataset as specified in [1]. This is 
+        only returned when `return_data=True`
+    forces : numpy.array of length 3n*(len(times)-1)
+        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
+        tn-1pnx]. This is only returned when `return_data=True`
         
     References
     ----------
@@ -906,12 +912,16 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         G[counts==0] = np.nan
     
     print('done')
-    return coefficients,forces,G,G_err,counts
+    if return_data:
+        return G,G_err,counts,coefficients,forces
+    else:
+        return G,G_err,counts
 
 
 def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                pos_cols=['z','y','x'],periodic_boundary=False,bruteforce=False,
-               remove_near_boundary=False,solve_per_dim=False):
+               remove_near_boundary=False,solve_per_dim=False,
+               return_data=False):
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
     over all subsequent sets of three timesteps and obtains forces from the 
@@ -967,14 +977,13 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     solve_per_dim : bool, optional
         if True, the matrix is solved for each dimension separately, and a 
         force vector and error are returned for each dimension.
+    return_data : bool, optional
+        If True, the full coefficient matrix and force vector are returned 
+        together with the force vector, error and the list of bincounts. The
+        default is False.
 
     Returns
     -------
-    coefficients : numpy.array of m by 3n*(len(times)-2)
-        coefficient matrix of the full dataset as specified in [1]
-    forces : numpy.array of length 3n*(len(times)-2)
-        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
-        tn-2pnx]
     G : numpy.array of length m
         discretized force vector, the result of the computation.
     G_err : numpy.array of length m
@@ -982,6 +991,12 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     counts : numpy.array of length m
         number of individual force evaluations contributing to the result in
         each bin.
+    coefficients : numpy.array of m by 3n*(len(times)-1)
+        coefficient matrix of the full dataset as specified in [1]. This is 
+        only returned when `return_data=True`
+    forces : numpy.array of length 3n*(len(times)-1)
+        vector of particle forces of form [t0p0z,t0p0y,t0p0x,t0p1z,t0p1y, ...,
+        tn-1pnx]. This is only returned when `return_data=True`
     
     References
     ----------
@@ -1158,4 +1173,8 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         )
         G[counts==0] = np.nan
 
-    return C,f,G,G_err,counts
+    if return_data:
+        return G,G_err,counts,C,f
+    else:
+        return G,G_err,counts
+
