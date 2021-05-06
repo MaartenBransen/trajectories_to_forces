@@ -682,12 +682,21 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         nested = True
         nsteps = len(times)
         
+        #perform checks to see if shapes/lengths of inputs match
         if not isinstance(coordinates[0],(list,np.ndarray)):
             raise ValueError('`coordinates` must be nested list if `times` is')
         if len(coordinates) != nsteps:
-            raise ValueError('length of `times` and `coordinates` must match')
+            raise ValueError('number of subsets in `times` and `coordinates` '
+                             'must match')
+        if any([len(coord)!=len(t) for coord,t in zip(coordinates,times)]):
+            raise ValueError('length of each subset in `times` and '
+                             '`coordinates` must match')
+        if any([len(t) <= 1 for t in times]):
+            raise ValueError('each subset in `times` and `coordinates` must '
+                             'have at least 2 elements')
         if not eval_particles is None:
-            if any(isinstance(ep,(list,set,np.ndarray)) for ep in eval_particles):
+            if any(isinstance(ep,(list,set,np.ndarray)) \
+                   for ep in eval_particles):
                 if len(eval_particles) != nsteps:
                     raise ValueError('length of `times` and `eval_particles'
                                      ' must match')
