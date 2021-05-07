@@ -515,7 +515,7 @@ def load_forceprofile(filename):
     return rvals,forces,counts,rsteps,rmax
 
 def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
-                      msd_min=0.01, msd_max=1):
+                      msd_min=0.01, msd_max=1, interval=1):
     """calculates the squared displacement between subsequent frames for each
     particle individually, meaned over all intervals, and filters the indices
     by some threshold displacement
@@ -535,10 +535,15 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
         particle coordinates along each dimension. The length (i.e. number of
         dimensions) must match len(boundary) and the number of columns in 
         `coordinates`. The default is `('z','y','x')`.
-    threshold : float, optional
-        Threshold value for the mean squared displacement between two 
-        subsequent time steps below which a particle is considered stationary. 
-        The default is 0.01.
+    msd_min : float, optional
+        Lower limit for the mean squared displacement between two  time steps 
+        below which a particle is considered stationary. The default is 0.01.
+    msd_max : float, optional
+        Upper limit on the MSD between two timesteps. The default is 1.
+    interval : int, optional
+        time interval in integer index units used for the calculations, e.g.
+        averaging over neigbouring steps or over larger intervals than the 
+        sampling rate in the data. The default is 1.
 
     Returns
     -------
@@ -559,12 +564,13 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
     indices = []
     msds = []
     
-    #in case of no timesteps return squared displacement
+    #in case of no timesteps return squared displacement / interval
     if times is None:
         for coord in coordinates:
             sd = []
-            for i,(coord0,coord1) in enumerate(_nwise(coord)):
-                sd.append(sum([(coord0[col]-coord1[col])**2 \
+            for i,(coord0,coord1) \
+                in enumerate(zip(coord[:-interval],coord[interval:])):
+                sd.append(sum([(coord0[col]-coord1[col])**2/interval \
                                for col in pos_cols]))
             sd = pd.concat(sd,axis=1)
             msd = sd.mean(axis=1,skipna=True)
@@ -576,8 +582,14 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
     else:
         for time,coord in zip(times,coordinates):
             sd = []
-            for i,((coord0,t0),(coord1,t1)) \
-                in enumerate(_nwise(zip(coord,time))):
+            for i,((coord0,t0,coord1,t1)) in enumerate(
+                    zip(
+                        coord[:-interval],
+                        time[:-interval],
+                        coord[interval:],
+                        time[interval:]
+                        )
+                ):
                 sd.append(sum([(coord0[col]-coord1[col])**2/(t1-t0) \
                                for col in pos_cols]))
             sd = pd.concat(sd,axis=1)
