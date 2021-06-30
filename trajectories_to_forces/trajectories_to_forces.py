@@ -600,7 +600,7 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
         
     return indices,msds
 
-def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
+def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
                    remove_near_boundary=True,solve_per_dim=False,
@@ -937,6 +937,302 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         return G,G_err,counts,coefficients,forces
     else:
         return G,G_err,counts
+    
+def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
+                   pos_cols=('z','y','x'),eval_particles=None,
+                   periodic_boundary=False,bruteforce=False,
+                   remove_near_boundary=True,solve_per_dim=False):
+    """
+    Run the analysis for overdamped dynamics (brownian dynamics like), iterates
+    over all subsequent sets of two timesteps and obtains forces from the 
+    velocity of the particles as a function of the distribution of the
+    particles around eachother.
+
+    Parameters
+    ----------
+    coordinates : list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep. Must be
+        indexed by particle (with each particle having a unique identifyer that
+        matches between different time steps) and contain coordinates along 
+        each dimension in a separate column, with column names matching those 
+        given in `pos_cols`.
+    times : list of float
+        list timestamps corresponding to the coordinates
+    boundary : list or tuple, optional
+        boundaries of the box in which the coordinates are defined in the form
+        ((d0_min,d0_max),(d1_min,d1_max),...) with a length (number) and order 
+        of dimensions matching `pos_cols`. The default is `None`, which uses 
+        the min and max value found in the entire set of coordinates along each
+        axis.
+    gamma : float, optional
+        damping/friction coefficient (kT/D) for calculation of F=V*kT/D. The
+        default is 1.
+    rmax : float, optional
+        cut-off radius for calculation of the pairwise forces. The default is
+        1.
+    m : int, optional
+        The number of discretization steps for the force profile, i.e. the
+        number of bins from 0 to rmax into which the data will be sorted. The
+        default is 20.
+    pos_cols : tuple of str, optional
+        names of the columns of the DataFrames in `coordinates` containing the
+        particle coordinates along each dimension. The length (i.e. number of
+        dimensions) must match len(boundary) and the number of columns in 
+        `coordinates`. The default is `('z','y','x')`.
+    periodic_boundary : bool, optional
+        Whether the box has periodic boundary conditions. If True, the boundary
+        must be given. The default is False.
+    bruteforce : bool, optional
+        If True, the coefficients are calculated in a naive brute-force 
+        approach with a nested loop over all particles. The default is False,
+        which uses a scipy.spatial.cKDTree based approach to only evaluate 
+        pairs which are <rmax apart.
+    remove_near_boundary : bool, optional
+        If true, particles which are closer than rmax from any of the
+        boundaries are not analyzed, but still accounted for when analyzing
+        particles closer to the center of the box in order to only analyze 
+        particles for which the full spherical shell up to rmax is within the 
+        box of coordinates, and to prevent erroneous handling of particles
+        which interact with other particles outside the measurement volume.
+        Only possible when periodic_boundary=False. The default is True.
+    solve_per_dim : bool, optional
+        if True, the matrix is solved for each dimension separately, and a 
+        force vector and error are returned for each dimension.
+
+    Returns
+    -------
+    G : numpy.array of length m
+        discretized force vector, the result of the computation.
+    G_err : numpy.array of length m
+        errors in G based on the least_squares solution of the matrix equation
+    counts : numpy.array of length m
+        number of individual force evaluations contributing to the result in
+        each bin.
+        
+    References
+    ----------
+    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction
+    potentials from arbitrary multi-particle trajectory data. Soft Matter, 11
+    (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
+
+    """
+    #check if one list or nested list, if not make it nested
+    if isinstance(times[0],(list,np.ndarray)):
+        nested = True
+        nsteps = len(times)
+        
+        #perform checks to see if shapes/lengths of inputs match
+        if not isinstance(coordinates[0],(list,np.ndarray)):
+            raise ValueError('`coordinates` must be nested list if `times` is')
+        if len(coordinates) != nsteps:
+            raise ValueError('number of subsets in `times` and `coordinates` '
+                             'must match')
+        if any([len(coord)!=len(t) for coord,t in zip(coordinates,times)]):
+            raise ValueError('length of each subset in `times` and '
+                             '`coordinates` must match')
+        if any([len(t) <= 1 for t in times]):
+            raise ValueError('each subset in `times` and `coordinates` must '
+                             'have at least 2 elements')
+        if not eval_particles is None:
+            if any(isinstance(ep,(list,set,np.ndarray)) \
+                   for ep in eval_particles):
+                if len(eval_particles) != nsteps:
+                    raise ValueError('length of `times` and `eval_particles'
+                                     ' must match')
+            elif len(eval_particles)!=nsteps or \
+                any(not ep is None for ep in eval_particles):
+                eval_particles = repeat(eval_particles)
+        else:
+            eval_particles = repeat(None)
+                     
+        
+    else:
+        nested = False
+        times = [times]
+        coordinates = [coordinates]
+        eval_particles = [eval_particles]
+    
+    #get dimensionality from pos_cols, check names
+    pos_cols = list(pos_cols)
+    ndims = len(pos_cols)
+    
+    #get default boundaries from min and max values in any coordinate set
+    if boundary is None:
+        if periodic_boundary:
+            raise ValueError('when periodic_boundary=True, boundary must be '
+                             'given')
+        boundary = [
+            [
+                repeat([
+                    min([c[dim].min() for c in coords]),
+                    max([c[dim].max() for c in coords])
+                ]) for dim in pos_cols
+            ] for coords in coordinates
+        ]
+        
+    #otherwise check inputs
+    elif nested:
+        #if single boundary for whole set given, make boundary iterable on a 
+        #per timestep per coordinate set basis
+        if np.array(boundary[0]).ndim == 1:
+            if len(boundary) != ndims:
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = repeat(repeat(boundary))
+        
+        #else check if length matches
+        elif len(boundary) != nsteps:
+            raise ValueError('length of `boundary` and `coordinates` must '
+                             'match')
+        
+        #if single boundary per coordinate set given
+        elif np.array(boundary[0]).ndim == 2:
+            #check dimensionality of each item
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            #make iterable on a per timestep basis
+            boundary = [repeat(bounds) for bounds in boundary]
+            
+        #if boundary for each timestep check lengths and dimensionality
+        elif any([len(bounds) != len(time) \
+                  for bounds,time in zip(boundary,times)]):
+            raise ValueError('number of items in each item in `boundary` must '
+                             'match that in `times`')
+        elif any([np.array(bounds).shape[1] != ndims for bounds in boundary]):
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+    
+    #if not nested, make nested with single item per list for later iterating
+    else:
+        if np.array(boundary[0]).ndim == 2:
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = [boundary]
+        elif len(boundary) != ndims:
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+        else:
+            boundary = [repeat(boundary)]
+        
+    #initialize matrices for least squares solving
+    X = np.zeros((m,m)) #C dot C.T
+    Y = np.zeros((m)) #C.T dot f
+    counts = np.zeros((m))
+    
+    #loop over separate sets of coordinates
+    for i,(coords,bounds,tsteps,eval_parts) in \
+        enumerate(zip(coordinates,boundary,times,eval_particles)):
+    
+        #get number of timestep
+        nt = len(tsteps)
+        
+        #check data
+        if nt != len(coords):
+            raise ValueError('length of timesteps does not match coordinate '
+                             'data')
+        
+        #loop over all sets of two particles
+        for j,((coords0,bound0,t0),(coords1,_,t1)) in \
+            enumerate(_nwise(zip(coords,bounds,tsteps),n=2)):
+            
+            #print progress
+            if nested:
+                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '
+                       '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-1,
+                                                    t0,t1),end='',flush=True)
+            else:
+                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '
+                       '{:.5f})').format(j+1,nt-1,t0,t1),end='',flush=True)
+            
+            #assure boundary is array
+            bound0 = np.array(bound0)
+            
+            #find the particles which are far enough from boundary
+            if remove_near_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError(
+                        'when remove_near_boundary=True, rmax cannot be more '
+                        'than half the smallest box dimension. Use rmax < '
+                        '{:}'.format(min(bound0[:,1]-bound0[:,0])/2)
+                    )
+                
+                selected = coords0.loc[(
+                    (coords0[pos_cols] >= bound0[:,0]+rmax).all(axis=1) &
+                    (coords0[pos_cols] <  bound0[:,1]-rmax).all(axis=1)
+                )].index
+                
+            else:
+                selected = coords0.index
+            
+            if not eval_parts is None:
+                selected = selected.intersection(set(eval_parts))
+            
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '
+                        'cannot be more than half the smallest box dimension')
+                
+                #remove any items outside of boundaries
+                mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
+                    (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
+                if mask.any():
+                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'
+                          ' some coordinates are outside of boundary and will'
+                          ' be removed')
+                    coords0 = coords0.loc[~mask]
+                        
+    
+            #calculate the force vector containin the total force acting on 
+            #each particle
+            f = _calculate_forces_overdamped(
+                    coords0.loc[selected],
+                    coords1,
+                    t1-t0,
+                    bound0,
+                    pos_cols,
+                    gamma=gamma,
+                    periodic_boundary=periodic_boundary,
+                ).sort_index()
+            
+            #reshape f to 3n vector and add to total vector
+            f = f[pos_cols].to_numpy().ravel()
+    
+            #find neighbours and coefficients at time t0 for all particles 
+            #present in t0 and t1
+            C,c = _calculate_coefficients(
+                    coords0.loc[set(coords0.index).intersection(coords1.index)],
+                    set(selected).intersection(coords1.index),
+                    rmax,
+                    m,
+                    bound0,
+                    pos_cols,
+                    bruteforce=bruteforce,
+                    periodic_boundary=periodic_boundary,
+                    )
+            
+            #precalculate dot products to avoid having entire matrix in memory
+            X += np.dot(C.T,C)
+            Y += np.dot(C.T,f)
+            counts += c
+        
+        #newline between steps
+        if nested:
+            print()
+    
+    if nested:
+        print('solving matrix equation')
+    else:
+        print('\nsolving matrix equation')
+
+    #solve eq. 15 from the paper
+    #G = [C dot C.T]**-1 dot [C.T dot F] = X**-1 dot Y
+    #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
+    G,G_err,_,_ = np.linalg.lstsq(X,Y,rcond=None)
+    G[counts==0] = np.nan
+    
+    print('done')
+    return G,G_err,counts
 
 
 def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
