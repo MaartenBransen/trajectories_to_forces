@@ -1126,6 +1126,10 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         #get number of timestep
         nt = len(tsteps)
         
+        #make sure eval_parts is a set
+        if not eval_parts is None and type(eval_parts) != set:
+            eval_parts = set(eval_parts)
+        
         #check data
         if nt != len(coords):
             raise ValueError('length of timesteps does not match coordinate '
@@ -1156,16 +1160,16 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                         '{:}'.format(min(bound0[:,1]-bound0[:,0])/2)
                     )
                 
-                selected = coords0.loc[(
+                selected = set(coords0.loc[(
                     (coords0[pos_cols] >= bound0[:,0]+rmax).all(axis=1) &
                     (coords0[pos_cols] <  bound0[:,1]-rmax).all(axis=1)
-                )].index
+                )].index)
                 
             else:
-                selected = coords0.index
+                selected = set(coords0.index)
             
             if not eval_parts is None:
-                selected = selected.intersection(set(eval_parts))
+                selected = selected.intersection(eval_parts)
             
             #check inputs
             if periodic_boundary:
