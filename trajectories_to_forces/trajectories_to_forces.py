@@ -195,13 +195,14 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,pos_cols,
         return (coords0 - 2*coords1 + coords2).dropna()*mass/dt**2
 
 
-@nb.njit(parallel=True)
+@nb.njit(parallel=False)
 def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
                               rmax,m):
     """loop over all pairs found by KDTree.query and calculate coefficients"""
     #allocate memory for coefficient matrix
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
+    binmeanpos = np.zeros(m)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
@@ -209,19 +210,21 @@ def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
             if not mask[i,j]:
                 d = dist[i,j]
                 counter[int(d/rmax*m)] += 1
+                binmeanpos[int(d/rmax*m)] += d
                 for dim in range(ndims):
                     coefficients[ndims*i+dim,int(d/rmax*m)] += \
                         (queryparticles[i,dim]-particles[indices[i,j],dim])/d
+    
+    return coefficients,counter,binmeanpos
 
-    return coefficients,counter
-
-@nb.njit(parallel=True)
+@nb.njit(parallel=False)
 def _bruteforce_pair_loop_nb(particles,queryparticles,ndims,rmax,m):
     """loop over all pairs with i from queryparticles and j from particles, and
     calculate coefficients"""
     #allocate memory for coefficient matrix
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
+    binmeanpos = np.zeros(m)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
@@ -229,11 +232,12 @@ def _bruteforce_pair_loop_nb(particles,queryparticles,ndims,rmax,m):
             d = np.sum((queryparticles[i]-particles[j])**2)**0.5
             if d < rmax and d != 0:
                 counter[int(d/rmax*m)] += 1
+                binmeanpos[int(d/rmax*m)] += d
                 for dim in range(ndims):
                     coefficients[ndims*i+dim,int(d/rmax*m)] += \
                         (queryparticles[i,dim]-particles[j,dim])/d
 
-    return coefficients,counter
+    return coefficients,counter,binmeanpos
 
 @nb.njit()
 def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
@@ -250,7 +254,7 @@ def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
             distances[dim] = i-j
     return distances
 
-@nb.njit(parallel=True)
+@nb.njit(parallel=False)
 def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
                                        indices,mask,rmax,m,boxmin,boxmax):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
@@ -258,6 +262,7 @@ def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
     #allocate memory for coefficient matrix
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
+    binmeanpos = np.zeros(m)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
@@ -268,12 +273,13 @@ def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
                 )
                 d = dist[i,j]
                 counter[int(d/rmax*m)] += 1
+                binmeanpos[int(d/rmax*m)] += d
                 for dim in range(ndims):
                     coefficients[ndims*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
 
-    return coefficients,counter
+    return coefficients,counter,binmeanpos
 
-@nb.njit(parallel=True)
+@nb.njit(parallel=False)
 def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
                                       boxmin,boxmax):
     """loop over all pairs with i from queryparticles and j from particles, and
@@ -281,6 +287,7 @@ def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
     #allocate memory for coefficient matrix
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
+    binmeanpos = np.zeros(m)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
@@ -291,10 +298,11 @@ def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
             d = np.sum(d_xyz**2)**0.5
             if d < rmax and d != 0:
                 counter[int(d/rmax*m)] += 1
+                binmeanpos[int(d/rmax*m)] += d
                 for dim in range(ndims):
                     coefficients[ndims*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
 
-    return coefficients,counter
+    return coefficients,counter,binmeanpos
 
 def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
                             periodic_boundary=False,bruteforce=False):
@@ -369,7 +377,7 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
         
         #optionally use (inefficient) brute-force search through all pairs
         if bruteforce:
-            coefficients,counter = _bruteforce_pair_loop_periodic_nb(
+            coefficients,counter,binmeanpos = _bruteforce_pair_loop_periodic_nb(
                 particles,queryparticles,ndims,rmax,m,boxmin,boxmax)
         
         #else use KDTree based efficient neighbour searching algorithm
@@ -392,7 +400,7 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             mask = (~np.isfinite(dist)) | (dist==0)
             
             #calculate the coefficients using the numba-compiled function
-            coefficients,counter = _coefficient_pair_loop_periodic_nb(
+            coefficients,counter,binmeanpos = _coefficient_pair_loop_periodic_nb(
                 particles,queryparticles,ndims,dist,indices,mask,rmax,m,boxmin,
                 boxmax
             )
@@ -401,7 +409,7 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
     else:
         #optionally use (inefficient) brute-force search through all pairs
         if bruteforce:
-            coefficients,counter = _bruteforce_pair_loop_nb(
+            coefficients,counter,binmeanpos = _bruteforce_pair_loop_nb(
                 particles,queryparticles,rmax,m
             )
         
@@ -413,14 +421,15 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
                 queryparticles,k=len(particles),distance_upper_bound=rmax)
             
             #remove pairs with self and np.inf fill values
+            #dist,indices = dist[:,1:],indices[:,1:]
             mask = (~np.isfinite(dist)) | (dist==0)
             
             #perform numba-optimized loop over particle pairs
-            coefficients,counter = _coefficient_pair_loop_nb(
+            coefficients,counter,binmeanpos = _coefficient_pair_loop_nb(
                 particles,queryparticles,ndims,dist,indices,mask,rmax,m
             )
 
-    return coefficients,counter
+    return coefficients,counter,binmeanpos
 
 #%% public definitions
 
@@ -874,7 +883,7 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     
             #find neighbours and coefficients at time t0 for all particles 
             #present in t0 and t1
-            C,c = _calculate_coefficients(
+            C,c,bmp = _calculate_coefficients(
                     coords0.loc[set(coords0.index).intersection(coords1.index)],
                     set(selected).intersection(coords1.index),
                     rmax,
@@ -1115,9 +1124,14 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             boundary = [repeat(boundary)]
         
     #initialize matrices for least squares solving
-    X = np.zeros((m,m)) #C dot C.T
-    Y = np.zeros((m)) #C.T dot f
+    if solve_per_dim:
+        X = [np.zeros((m,m)) for _ in range(ndims)]
+        Y = [np.zeros((m)) for _ in range(ndims)]
+    else:
+        X = np.zeros((m,m)) #C dot C.T
+        Y = np.zeros((m)) #C.T dot f
     counts = np.zeros((m))
+    binmeanpos = np.zeros((m))
     
     #loop over separate sets of coordinates
     for i,(coords,bounds,tsteps,eval_parts) in \
@@ -1190,35 +1204,43 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             #calculate the force vector containin the total force acting on 
             #each particle
             f = _calculate_forces_overdamped(
-                    coords0.loc[selected],
-                    coords1,
-                    t1-t0,
-                    bound0,
-                    pos_cols,
-                    gamma=gamma,
-                    periodic_boundary=periodic_boundary,
-                ).sort_index()
+                coords0.loc[selected],
+                coords1,
+                t1-t0,
+                bound0,
+                pos_cols,
+                gamma=gamma,
+                periodic_boundary=periodic_boundary,
+            ).sort_index()
             
             #reshape f to 3n vector and add to total vector
             f = f[pos_cols].to_numpy().ravel()
     
             #find neighbours and coefficients at time t0 for all particles 
             #present in t0 and t1
-            C,c = _calculate_coefficients(
-                    coords0.loc[set(coords0.index).intersection(coords1.index)],
-                    set(selected).intersection(coords1.index),
-                    rmax,
-                    m,
-                    bound0,
-                    pos_cols,
-                    bruteforce=bruteforce,
-                    periodic_boundary=periodic_boundary,
-                    )
+            C,c,bmp = _calculate_coefficients(
+                coords0.loc[set(coords0.index).intersection(coords1.index)],
+                set(selected).intersection(coords1.index),
+                rmax,
+                m,
+                bound0,
+                pos_cols,
+                bruteforce=bruteforce,
+                periodic_boundary=periodic_boundary,
+            )
             
             #precalculate dot products to avoid having entire matrix in memory
-            X += np.dot(C.T,C)
-            Y += np.dot(C.T,f)
+            if solve_per_dim:
+                for dim in range(ndims):
+                    X[dim] += np.dot(C[dim::ndims].T,C[dim::ndims])
+                    Y[dim] += np.dot(C[dim::ndims].T,f[dim::ndims])
+            else:
+                X += np.dot(C.T,C)
+                Y += np.dot(C.T,f)
+            
+            #update counter and mean bin positions
             counts += c
+            binmeanpos += bmp
         
         #newline between steps
         if nested:
@@ -1229,20 +1251,36 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     else:
         print('\nsolving matrix equation')
 
-    #solve eq. 15 from the paper
-    #G = [C dot C.T]**-1 dot [C.T dot F] = X**-1 dot Y
-    #G = sp.dot(sp.dot(1/sp.dot(C.T,C),C.T),f)
-    G,G_err,_,_ = np.linalg.lstsq(X,Y,rcond=None)
-    G[counts==0] = np.nan
+    #solve eq. 15 from the paper in x, y and z separately
+    if solve_per_dim:
+        G = []
+        G_err = []
+        for dim in range(ndims):
+            G_dim,G_dim_err,_,_ = np.linalg.lstsq(X[dim],Y[dim],rcond=None)
+            G_dim[counts==0] = np.nan
+            G.append(G_dim)
+            G_err.append(G_dim_err)
+        G,G_err = tuple(G),tuple(G_err)
+    
+    #solve eq. 15 from the paper for all dimensions together
+    else:
+        #solve eq. 15 from the paper for all dims simultaneously
+        #G = [C dot C.T]**-1 dot [C.T dot F] = X**-1 dot Y
+        G,G_err,_,_ = np.linalg.lstsq(X,Y,rcond=None)
+        G[counts==0] = np.nan
+    
+    #calculate mean distance in each bin
+    binmeanpos[counts==0] = np.nan
+    binmeanpos /= counts
     
     print('done')
-    return G,G_err,counts
+    return G,G_err,counts,binmeanpos
 
 
 def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                pos_cols=['z','y','x'],periodic_boundary=False,bruteforce=False,
                remove_near_boundary=False,solve_per_dim=False,
-               return_data=False):
+               return_data=False,):
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
     over all subsequent sets of three timesteps and obtains forces from the 
@@ -1446,7 +1484,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
             forces.append(f)
             
             #find neighbours and coefficients 
-            C,c = _calculate_coefficients(
+            C,c,bmp = _calculate_coefficients(
                 coords1.loc[set(coords1.index).intersection(
                     coords0.index).intersection(coords2.index)],
                 set(selected).intersection(coords0.index).intersection(
