@@ -1,4 +1,4 @@
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 from .trajectories_to_forces import run_overdamped,run_inertial,\
     save_forceprofile,load_forceprofile,filter_msd,run_overdamped_legacy

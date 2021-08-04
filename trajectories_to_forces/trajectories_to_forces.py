@@ -203,10 +203,11 @@ def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
     binmeanpos = np.zeros(m)
+    imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
-    for i in nb.prange(len(queryparticles)):
-        for j in range(len(particles)):
+    for i in nb.prange(imax):
+        for j in range(jmax):
             if not mask[i,j]:
                 d = dist[i,j]
                 counter[int(d/rmax*m)] += 1
@@ -263,10 +264,11 @@ def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
     coefficients = np.zeros((ndims*len(queryparticles),m))
     counter = np.zeros(m)
     binmeanpos = np.zeros(m)
+    imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
-    for i in nb.prange(len(queryparticles)):
-        for j in range(len(particles)):
+    for i in nb.prange(imax):
+        for j in range(jmax):
             if not mask[i,j]:
                 d_xyz = _distance_periodic_wrap(
                     queryparticles[i],particles[indices[i,j]],boxmin,boxmax
@@ -305,7 +307,8 @@ def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
     return coefficients,counter,binmeanpos
 
 def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
-                            periodic_boundary=False,bruteforce=False):
+                            periodic_boundary=False,bruteforce=False,
+                            neighbour_upper_bound=None):
     """
     Uses a brute force method for finding all neighbours of particles within 
     a cutoff radius and then calculates the coefficient matrix C* from the
@@ -368,6 +371,12 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
     particles = coords[pos_cols].to_numpy()
     queryparticles = coords.loc[sorted(query_indices)][pos_cols].to_numpy()
     
+    #set maximum number of neighbours 1 particle may have within rmax
+    if neighbour_upper_bound is None:
+        neighbour_upper_bound = len(particles)
+    else:
+        neighbour_upper_bound = min([neighbour_upper_bound,len(particles)])
+    
     #coefficient calculation in periodic boundary conditions
     if periodic_boundary:
         
@@ -392,12 +401,13 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             tree = cKDTree(particles,boxsize=boxmax)
             dist,indices = tree.query(
                 queryparticles,
-                k=len(particles),
-                distance_upper_bound=rmax
+                k=neighbour_upper_bound,
+                distance_upper_bound=rmax,
             )
             
             #remove pairs with self and np.inf fill values
-            mask = (~np.isfinite(dist)) | (dist==0)
+            dist = dist[1:]
+            mask = ~np.isinf(dist)
             
             #calculate the coefficients using the numba-compiled function
             coefficients,counter,binmeanpos = _coefficient_pair_loop_periodic_nb(
@@ -418,12 +428,16 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             #initialize and query KDTree for fast pairfinding
             tree = cKDTree(particles)
             dist,indices = tree.query(
-                queryparticles,k=len(particles),distance_upper_bound=rmax)
+                queryparticles,
+                k=neighbour_upper_bound,
+                distance_upper_bound=rmax,
+            )
             
             #remove pairs with self and np.inf fill values
-            #dist,indices = dist[:,1:],indices[:,1:]
-            mask = (~np.isfinite(dist)) | (dist==0)
-            
+            #remove pairs with self and np.inf fill values
+            dist = dist[1:]
+            mask = ~np.isinf(dist)
+
             #perform numba-optimized loop over particle pairs
             coefficients,counter,binmeanpos = _coefficient_pair_loop_nb(
                 particles,queryparticles,ndims,dist,indices,mask,rmax,m
@@ -437,6 +451,7 @@ def save_forceprofile(
         filename,
         rsteps,
         rmax,
+        rmeans,
         forces,
         counts):
     """
@@ -450,6 +465,8 @@ def save_forceprofile(
         number of bins
     rmax : float
         cut-off radius for force
+    rmeans : list of float
+        mean value of all pairs in each bin, i.e. a 'count weighted' bin center
     forces : list of float
         list of force values as obtained from the trajectory analysis
     counts : list of int
@@ -470,13 +487,8 @@ def save_forceprofile(
         file.write('r\tforce\tcounts\n')
 
         #write table
-        for i,r in enumerate(np.linspace(
-                0+rmax/2/rsteps,
-                rmax+rmax/2/rsteps,
-                rsteps,
-                endpoint=False
-            )):
-            file.write(f'{r:.3f}\t{forces[i]:5f}\t{int(counts[i]):d}\n')
+        for r,f,c in zip(rmeans,forces,counts):
+            file.write(f'{r:.3f}\t{f:5f}\t{int(c):d}\n')
 
     print('saved results as "'+filename+'"')
 
@@ -491,8 +503,8 @@ def load_forceprofile(filename):
 
     Returns
     -------
-    rvals : list
-        bin edges of pairwise interparticle distance
+    rmeans : list of float
+        count-weighted mean r value of all pairs contributing to the bin
     forces : list
         the mean force in each bin
     counts : list
@@ -511,17 +523,17 @@ def load_forceprofile(filename):
     rmax = float(filedata[1].split()[1])
 
     #load data table
-    rvals = []
+    rmeans = []
     forces = []
     counts = []
 
     for line in filedata[4:]:
         line = line.split()
-        rvals.append(float(line[0]))
+        rmeans.append(float(line[0]))
         forces.append(float(line[1]))
         counts.append(int(line[2]))
 
-    return rvals,forces,counts,rsteps,rmax
+    return rmeans,forces,counts,rsteps,rmax
 
 def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
                       msd_min=0.01, msd_max=1, interval=1):
@@ -950,7 +962,8 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
-                   remove_near_boundary=True,solve_per_dim=False):
+                   remove_near_boundary=True,solve_per_dim=False,
+                   neighbour_upper_bound=None):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -1007,6 +1020,10 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     solve_per_dim : bool, optional
         if True, the matrix is solved for each dimension separately, and a 
         force vector and error are returned for each dimension.
+    neighbour_upper_bound : int
+        upper bound on the number of neighbours within rmax a particle may have
+        to limit memory use and computing time in the pair finding step. The
+        default is the total number of particles in each time step.
 
     Returns
     -------
@@ -1136,7 +1153,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     #loop over separate sets of coordinates
     for i,(coords,bounds,tsteps,eval_parts) in \
         enumerate(zip(coordinates,boundary,times,eval_particles)):
-    
+        
         #get number of timestep
         nt = len(tsteps)
         
@@ -1152,7 +1169,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         #loop over all sets of two particles
         for j,((coords0,bound0,t0),(coords1,_,t1)) in \
             enumerate(_nwise(zip(coords,bounds,tsteps),n=2)):
-            
+                
             #print progress
             if nested:
                 print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '
@@ -1227,6 +1244,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                 pos_cols,
                 bruteforce=bruteforce,
                 periodic_boundary=periodic_boundary,
+                neighbour_upper_bound=neighbour_upper_bound,
             )
             
             #precalculate dot products to avoid having entire matrix in memory
@@ -1280,7 +1298,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                pos_cols=['z','y','x'],periodic_boundary=False,bruteforce=False,
                remove_near_boundary=False,solve_per_dim=False,
-               return_data=False,):
+               return_data=False,neighbour_upper_bound=None,):
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
     over all subsequent sets of three timesteps and obtains forces from the 
@@ -1340,6 +1358,10 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
         If True, the full coefficient matrix and force vector are returned 
         together with the force vector, error and the list of bincounts. The
         default is False.
+    neighbour_upper_bound : int
+        upper bound on the number of neighbours within rmax a particle may have
+        to limit memory use and computing time in the pair finding step. The
+        default is the total number of particles in each time step.
 
     Returns
     -------
@@ -1495,6 +1517,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                 pos_cols,
                 bruteforce=bruteforce,
                 periodic_boundary=periodic_boundary,
+                neighbour_upper_bound=neighbour_upper_bound,
             )
             coefficients.append(C)
             counts.append(c)
