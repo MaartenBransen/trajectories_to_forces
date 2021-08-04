@@ -406,8 +406,8 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             )
             
             #remove pairs with self and np.inf fill values
-            dist = dist[1:]
-            mask = ~np.isinf(dist)
+            dist, indices = dist[:,1:],indices[:,1:]
+            mask = np.isinf(dist)
             
             #calculate the coefficients using the numba-compiled function
             coefficients,counter,binmeanpos = _coefficient_pair_loop_periodic_nb(
@@ -434,9 +434,8 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             )
             
             #remove pairs with self and np.inf fill values
-            #remove pairs with self and np.inf fill values
-            dist = dist[1:]
-            mask = ~np.isinf(dist)
+            dist, indices = dist[:,1:], indices[:,1:]
+            mask = np.isinf(dist)
 
             #perform numba-optimized loop over particle pairs
             coefficients,counter,binmeanpos = _coefficient_pair_loop_nb(
