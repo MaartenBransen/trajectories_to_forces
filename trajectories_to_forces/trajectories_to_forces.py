@@ -219,6 +219,37 @@ def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
     return coefficients,counter,binmeanpos
 
 @nb.njit(parallel=False)
+def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
+                                     indices,mask,rmax,m):
+    """loop over all pairs found by KDTree.query and calculate coefficients
+    using linear basis functions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((ndims*len(queryparticles),m+1))
+    counter = np.zeros(m+1)
+    binmeanpos = np.zeros(m+1)
+    imax,jmax = dist.shape
+    dr = rmax/m
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                d = dist[i,j]
+                lb = int(d/rmax*m) #floor division gives nearest bin on left
+                phi = np.array([1-(d-lb*dr)/dr,1+(d-dr*(lb+1))/dr])
+                counter[lb] += phi[0]
+                counter[lb+1] += phi[1]
+                binmeanpos[lb] += d*phi[0]
+                binmeanpos[lb+1] += d*phi[1]
+                for dim in range(ndims):
+                    coefficients[ndims*i+dim,lb] += phi[0]*\
+                        (queryparticles[i,dim]-particles[indices[i,j],dim])/d
+                    coefficients[ndims*i+dim,lb+1] += phi[1]*\
+                        (queryparticles[i,dim]-particles[indices[i,j],dim])/d
+    
+    return coefficients[:,:-1],counter[:-1],binmeanpos[:-1]
+
+@nb.njit(parallel=False)
 def _bruteforce_pair_loop_nb(particles,queryparticles,ndims,rmax,m):
     """loop over all pairs with i from queryparticles and j from particles, and
     calculate coefficients"""
@@ -282,6 +313,38 @@ def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
     return coefficients,counter,binmeanpos
 
 @nb.njit(parallel=False)
+def _coefficient_pair_loop_periodic_linear_nb(particles,queryparticles,ndims,
+        dist,indices,mask,rmax,m,boxmin,boxmax):
+    """loop over all pairs found by KDTree.query and calculate coefficients
+    in periodic boundary conditions using linear basis functions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((ndims*len(queryparticles),m+1))
+    counter = np.zeros(m+1)
+    binmeanpos = np.zeros(m+1)
+    imax,jmax = dist.shape
+    dr = rmax/m
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                d_xyz = _distance_periodic_wrap(
+                    queryparticles[i],particles[indices[i,j]],boxmin,boxmax
+                )
+                d = dist[i,j]
+                lb = int(d/rmax*m) #floor division gives nearest bin on left
+                phi = [1-(d-lb*dr)/dr,1+(d-dr*(lb+1))/dr]
+                counter[lb] += phi[0]
+                counter[lb+1] += phi[1]
+                binmeanpos[lb] += d*phi[0]
+                binmeanpos[lb+1] += d*phi[1]
+                for dim in range(ndims):
+                    coefficients[ndims*i+dim,lb] += phi[0]*d_xyz[dim]/d
+                    coefficients[ndims*i+dim,lb+1] += phi[1]*d_xyz[dim]/d
+    
+    return coefficients[:,:-1],counter[:-1],binmeanpos[:-1]
+
+@nb.njit(parallel=False)
 def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
                                       boxmin,boxmax):
     """loop over all pairs with i from queryparticles and j from particles, and
@@ -307,8 +370,8 @@ def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
     return coefficients,counter,binmeanpos
 
 def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
-                            periodic_boundary=False,bruteforce=False,
-                            neighbour_upper_bound=None):
+        periodic_boundary=False,bruteforce=False,basis_function='constant',
+        neighbour_upper_bound=None):
     """
     Uses a brute force method for finding all neighbours of particles within 
     a cutoff radius and then calculates the coefficient matrix C* from the
@@ -353,6 +416,9 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
         evaluated instead of (the default) efficient KDtree approach for pair
         finding. When periodic_boundary=True, bruteforcing is always used. The
         default is False.
+    basis_function : ['constant','linear'], optional
+        which type of basis function to use for the discritization of the 
+        pairwise force
 
     Returns
     -------
@@ -409,11 +475,19 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             dist, indices = dist[:,1:],indices[:,1:]
             mask = np.isinf(dist)
             
-            #calculate the coefficients using the numba-compiled function
-            coefficients,counter,binmeanpos = _coefficient_pair_loop_periodic_nb(
-                particles,queryparticles,ndims,dist,indices,mask,rmax,m,boxmin,
-                boxmax
-            )
+            #perform numba-optimized loop over particle pairs
+            if basis_function == 'constant':
+                coefficients,counter,binmeanpos = \
+                    _coefficient_pair_loop_periodic_nb(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,
+                        m,boxmin,boxmax
+                    )
+            elif basis_function == 'linear':
+                coefficients,counter,binmeanpos = \
+                    _coefficient_pair_loop_periodic_linear_nb(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,
+                        m,boxmin,boxmax
+                    )
     
     #no periodic boundary conditions
     else:
@@ -438,9 +512,16 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             mask = np.isinf(dist)
 
             #perform numba-optimized loop over particle pairs
-            coefficients,counter,binmeanpos = _coefficient_pair_loop_nb(
-                particles,queryparticles,ndims,dist,indices,mask,rmax,m
-            )
+            if basis_function == 'constant':
+                coefficients,counter,binmeanpos = \
+                    _coefficient_pair_loop_nb(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,m
+                    )
+            elif basis_function == 'linear':
+                coefficients,counter,binmeanpos = \
+                    _coefficient_pair_loop_linear_nb(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,m
+                    )
 
     return coefficients,counter,binmeanpos
 
@@ -960,9 +1041,9 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     
 def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                    pos_cols=('z','y','x'),eval_particles=None,
-                   periodic_boundary=False,bruteforce=False,
-                   remove_near_boundary=True,solve_per_dim=False,
-                   neighbour_upper_bound=None):
+                   periodic_boundary=False,basis_function='constant',
+                   bruteforce=False,remove_near_boundary=True,
+                   solve_per_dim=False,neighbour_upper_bound=None):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -1041,6 +1122,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
+    #bruteforce with linear basis functions is not implemented
+    if bruteforce and basis_function=='linear':
+        raise NotImplementedError('bruteforcing with linear basis functions'
+                                  'is not implemented')
+    
     #check if one list or nested list, if not make it nested
     if isinstance(times[0],(list,np.ndarray)):
         nested = True
@@ -1165,7 +1251,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             raise ValueError('length of timesteps does not match coordinate '
                              'data')
         
-        #loop over all sets of two particles
+        #loop over all sets of two coordinate arrays
         for j,((coords0,bound0,t0),(coords1,_,t1)) in \
             enumerate(_nwise(zip(coords,bounds,tsteps),n=2)):
                 
@@ -1243,6 +1329,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                 pos_cols,
                 bruteforce=bruteforce,
                 periodic_boundary=periodic_boundary,
+                basis_function=basis_function,
                 neighbour_upper_bound=neighbour_upper_bound,
             )
             
@@ -1281,10 +1368,20 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     
     #solve eq. 15 from the paper for all dimensions together
     else:
-        #solve eq. 15 from the paper for all dims simultaneously
-        #G = [C dot C.T]**-1 dot [C.T dot F] = X**-1 dot Y
-        G,G_err,_,_ = np.linalg.lstsq(X,Y,rcond=None)
+        #initialize result and error vectors
+        G,G_err = np.empty(m),np.empty(m)
         G[counts==0] = np.nan
+        G_err[counts==0] = np.nan
+        
+        #remove bins with zero data
+        X = X[counts>0][:,counts>0]
+        Y = Y[counts>0]
+        
+        #solve for lowest error solution
+        G[counts>0] = np.dot(np.linalg.inv(X),Y)
+        
+        #calculate error
+        G_err[counts>0] = Y - np.dot(X,G[counts>0])
     
     #calculate mean distance in each bin
     binmeanpos[counts==0] = np.nan
