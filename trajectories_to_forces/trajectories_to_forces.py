@@ -228,7 +228,6 @@ def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
     counter = np.zeros(m+1)
     binmeanpos = np.zeros(m+1)
     imax,jmax = dist.shape
-    dr = rmax/m
     
     #loop over pairs in distance/indices array
     for i in nb.prange(imax):
@@ -236,7 +235,7 @@ def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
             if not mask[i,j]:
                 d = dist[i,j]
                 lb = int(d/rmax*m) #floor division gives nearest bin on left
-                phi = np.array([1-(d-lb*dr)/dr,1+(d-dr*(lb+1))/dr])
+                phi = np.array([1-d/rmax*m+lb, 1+d/rmax*m-(lb+1)])
                 counter[lb] += phi[0]
                 counter[lb+1] += phi[1]
                 binmeanpos[lb] += d*phi[0]
