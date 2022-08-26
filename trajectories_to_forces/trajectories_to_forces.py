@@ -527,11 +527,13 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
 
 def save_forceprofile(
         filename,
-        rsteps,
-        rmax,
         rmeans,
         forces,
-        counts):
+        counts,
+        rsteps,
+        rmax,
+        gamma
+    ):
     """
     Saves the results to a text file
 
@@ -539,16 +541,18 @@ def save_forceprofile(
     ----------
     filename : string
         filename to use for results file
-    rsteps : int
-        number of bins
-    rmax : float
-        cut-off radius for force
     rmeans : list of float
         mean value of all pairs in each bin, i.e. a 'count weighted' bin center
     forces : list of float
         list of force values as obtained from the trajectory analysis
     counts : list of int
         the number of evaluations used for each bin
+    rsteps : int
+        number of bins
+    rmax : float
+        cut-off radius for force
+    gamma : float
+        the friction coefficient used in the calculation
 
     Returns
     -------
@@ -557,6 +561,7 @@ def save_forceprofile(
     """
     with open(filename,'w+') as file:
         #write input parameters
+        file.write("gamma:\t{:.5f}\n".format(gamma))
         file.write("rsteps:\t{}\n".format(rsteps))
         file.write("rmax:\t{}\n".format(rmax))
         file.write('\n')
@@ -566,7 +571,7 @@ def save_forceprofile(
 
         #write table
         for r,f,c in zip(rmeans,forces,counts):
-            file.write(f'{r:.3f}\t{f:5f}\t{int(c):d}\n')
+            file.write(f'{r:.3f}\t{f: 5f}\t{int(c):d}\n')
 
     print('saved results as "'+filename+'"')
 
@@ -591,27 +596,35 @@ def load_forceprofile(filename):
         number of discretization steps
     rmax : float
         cut-off radius for force
+    gamma : float
+        the friction coefficient used in the calculation
 
     """
     with open(filename,'r') as file:
         filedata = [line[:-1] for line in file.readlines()]
 
     #load input parameters
-    rsteps = int(filedata[0].split()[1])
-    rmax = float(filedata[1].split()[1])
+    s = 0
+    if 'gamma' in filedata[0]:
+        gamma = float(filedata[0].split()[1])
+        s=1
+    else:
+        gamma = None
+    rsteps = int(filedata[0+s].split()[1])
+    rmax = float(filedata[1+s].split()[1])
 
     #load data table
     rmeans = []
     forces = []
     counts = []
 
-    for line in filedata[4:]:
+    for line in filedata[4+s:]:
         line = line.split()
         rmeans.append(float(line[0]))
         forces.append(float(line[1]))
         counts.append(int(line[2]))
 
-    return rmeans,forces,counts,rsteps,rmax
+    return rmeans,forces,counts,rsteps,rmax,gamma
 
 def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
                       msd_min=0.01, msd_max=1, interval=1):
