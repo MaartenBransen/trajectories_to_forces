@@ -1317,7 +1317,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             #calculate the force vector containin the total force acting on 
             #each particle
             f = _calculate_forces_overdamped(
-                coords0.loc[selected],
+                coords0.loc[sorted(selected)],
                 coords1,
                 t1-t0,
                 bound0,
@@ -1332,7 +1332,9 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
             #find neighbours and coefficients at time t0 for all particles 
             #present in t0 and t1
             C,c,bmp = _calculate_coefficients(
-                coords0.loc[set(coords0.index).intersection(coords1.index)],
+                coords0.loc[
+                    list(set(coords0.index).intersection(coords1.index))
+                ],
                 set(selected).intersection(coords1.index),
                 rmax,
                 m,
@@ -1614,8 +1616,10 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
             
             #find neighbours and coefficients 
             C,c,bmp = _calculate_coefficients(
-                coords1.loc[set(coords1.index).intersection(
-                    coords0.index).intersection(coords2.index)],
+                coords1.loc[
+                    list(set(coords1.index).intersection(
+                        coords0.index).intersection(coords2.index))
+                ],
                 set(selected).intersection(coords0.index).intersection(
                     coords2.index),
                 rmax,
