@@ -553,6 +553,11 @@ def _calculate_coefficients(coords,query_indices,rmax,M,boundary,pos_cols,
         
         #optionally use (inefficient) brute-force search through all pairs
         if bruteforce:
+            if basis_function == 'linear':
+                raise NotImplementedError(
+                    'bruteforcing with linear basis functions is not '
+                    'implemented'
+                )
             coefficients,counter,binmeanpos = _bruteforce_pair_loop_periodic(
                 particles,queryparticles,ndims,rmax,M,boxmin,boxmax)
         
@@ -1198,9 +1203,20 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
         particle coordinates along each dimension. The length (i.e. number of
         dimensions) must match len(boundary) and the number of columns in 
         `coordinates`. The default is `('z','y','x')`.
+    eval_particles : set
+        set of particle id's (matching the indices in `coordinates`) to use in 
+        the force evaluation, such that forces are not calculated for any 
+        particle not in the set of eval_particles. Note that all particles are
+        always used to calculate the coefficients.
     periodic_boundary : bool, optional
         Whether the box has periodic boundary conditions. If True, the boundary
         must be given. The default is False.
+    basis_function : ['constant', 'linear']
+        the type of basis functions to use, where `'constant'` uses square wave
+        basis functions which assume the force is constant over each bin, and 
+        `'linear'` uses linear wave basis functions where each pair contributes
+        to the nearby bins with linearly interpolated weights. The default is 
+        `'constant'`.
     bruteforce : bool, optional
         If True, the coefficients are calculated in a naive brute-force 
         approach with a nested loop over all particles. The default is False,
@@ -1239,108 +1255,17 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
 
     """
-    #bruteforce with linear basis functions is not implemented
-    if bruteforce and basis_function=='linear':
-        raise NotImplementedError('bruteforcing with linear basis functions'
-                                  'is not implemented')
+    #warn against inaccurate bounds
+    if periodic_boundary and boundary is None:
+        raise ValueError('when periodic_boundary=True, boundary must be '
+                             'given')
     
-    #check if one list or nested list, if not make it nested
-    if isinstance(times[0],(list,np.ndarray)):
-        nested = True
-        nsteps = len(times)
-        
-        #perform checks to see if shapes/lengths of inputs match
-        if not isinstance(coordinates[0],(list,np.ndarray)):
-            raise ValueError('`coordinates` must be nested list if `times` is')
-        if len(coordinates) != nsteps:
-            raise ValueError('number of subsets in `times` and `coordinates` '
-                             'must match')
-        if any([len(coord)!=len(t) for coord,t in zip(coordinates,times)]):
-            raise ValueError('length of each subset in `times` and '
-                             '`coordinates` must match')
-        if any([len(t) <= 1 for t in times]):
-            raise ValueError('each subset in `times` and `coordinates` must '
-                             'have at least 2 elements')
-        if not eval_particles is None:
-            if any(isinstance(ep,(list,set,np.ndarray)) \
-                   for ep in eval_particles):
-                if len(eval_particles) != nsteps:
-                    raise ValueError('length of `times` and `eval_particles'
-                                     ' must match')
-            elif len(eval_particles)!=nsteps or \
-                any(not ep is None for ep in eval_particles):
-                eval_particles = repeat(eval_particles)
-        else:
-            eval_particles = repeat(None)
-                     
-        
-    else:
-        nested = False
-        times = [times]
-        coordinates = [coordinates]
-        eval_particles = [eval_particles]
-    
-    #get dimensionality from pos_cols, check names
+    #check the inputs
     pos_cols = list(pos_cols)
     ndims = len(pos_cols)
-    
-    #get default boundaries from min and max values in any coordinate set
-    if boundary is None:
-        if periodic_boundary:
-            raise ValueError('when periodic_boundary=True, boundary must be '
-                             'given')
-        boundary = [
-            [
-                repeat([
-                    min([c[dim].min() for c in coords]),
-                    max([c[dim].max() for c in coords])
-                ]) for dim in pos_cols
-            ] for coords in coordinates
-        ]
-        
-    #otherwise check inputs
-    elif nested:
-        #if single boundary for whole set given, make boundary iterable on a 
-        #per timestep per coordinate set basis
-        if np.array(boundary[0]).ndim == 1:
-            if len(boundary) != ndims:
-                raise ValueError('number of `pos_cols` does not match '
-                                 '`boundary`')
-            boundary = repeat(repeat(boundary))
-        
-        #else check if length matches
-        elif len(boundary) != nsteps:
-            raise ValueError('length of `boundary` and `coordinates` must '
-                             'match')
-        
-        #if single boundary per coordinate set given
-        elif np.array(boundary[0]).ndim == 2:
-            #check dimensionality of each item
-            if any([len(bounds) != ndims for bounds in boundary]):
-                raise ValueError('number of `pos_cols` does not match '
-                                 '`boundary`')
-            #make iterable on a per timestep basis
-            boundary = [repeat(bounds) for bounds in boundary]
-            
-        #if boundary for each timestep check lengths and dimensionality
-        elif any([len(bounds) != len(time) \
-                  for bounds,time in zip(boundary,times)]):
-            raise ValueError('number of items in each item in `boundary` must '
-                             'match that in `times`')
-        elif any([np.array(bounds).shape[1] != ndims for bounds in boundary]):
-            raise ValueError('number of `pos_cols` does not match `boundary`')
-    
-    #if not nested, make nested with single item per list for later iterating
-    else:
-        if np.array(boundary[0]).ndim == 2:
-            if any([len(bounds) != ndims for bounds in boundary]):
-                raise ValueError('number of `pos_cols` does not match '
-                                 '`boundary`')
-            boundary = [boundary]
-        elif len(boundary) != ndims:
-            raise ValueError('number of `pos_cols` does not match `boundary`')
-        else:
-            boundary = [repeat(boundary)]
+    coordinates, times, boundary, eval_particles, nested = \
+        _check_inputs(coordinates, times, boundary, pos_cols, eval_particles)
+    nsteps = len(times)
         
     #initialize matrices for least squares solving
     if solve_per_dim:
@@ -1947,7 +1872,10 @@ def _calculate_coefficients_cylindrical(
         periodic_boundary=False,basis_function='constant',
         neighbour_upper_bound=None
     ):
-    
+    """calculate the coefficient matric in cylindrical coordinates where the 
+    first dimension is the cylinder axis and the second and third define the 
+    circularly symmetric plane
+    """
     #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
     coords.sort_index(inplace=True)
     particles = coords[pos_cols].to_numpy()
@@ -2028,7 +1956,90 @@ def run_overdamped_cylindrical(
         basis_function='constant',remove_near_boundary=True,
         neighbour_upper_bound=None
     ):
+    """
+    Run the analysis for overdamped dynamics (brownian dynamics like) in a 
+    cylindrical coordinate system where interactions are radially averaged in 
+    the xy plane (dimensions 2 and 1) but not along the cylinder (z) axis.
 
+    Parameters
+    ----------
+    coordinates : list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep. Must be
+        indexed by particle (with each particle having a unique identifyer that
+        matches between different time steps) and contain coordinates along 
+        each dimension in a separate column, with column names matching those 
+        given in `pos_cols`.
+    times : list of float
+        list timestamps corresponding to the coordinates
+    boundary : list or tuple, optional
+        boundaries of the box in which the coordinates are defined in the form
+        ((d0_min,d0_max),(d1_min,d1_max),...) with a length (number) and order 
+        of dimensions matching `pos_cols`. The default is `None`, which uses 
+        the min and max value found in the entire set of coordinates along each
+        axis.
+    gamma : float, optional
+        damping/friction coefficient (kT/D) for calculation of F=V*kT/D. The
+        default is 1.
+    rmax : float, optional
+        cut-off radius for calculation of the pairwise forces. The default is
+        1.
+    M_z : int, optional
+        The number of discretization steps for the force profile along the z
+        (cylinder) direction, i.e. the number of bins from 0 to rmax into which
+        the data will be sorted. The default is 20.
+    M_rho : int, optional
+        The number of discretization steps along the axial (rho) direction. The
+        default is 20.
+    pos_cols : tuple of str, optional
+        names of the columns of the DataFrames in `coordinates` containing the
+        particle coordinates along each dimension. The first is assumed to be 
+        the axial (z) direction and the second and third define the plane for 
+        the rho component. The default is `('z','y','x')`.
+    eval_particles : set, optional
+        set of particle id's (matching the indices in `coordinates`) to use in 
+        the force evaluation, such that forces are not calculated for any 
+        particle not in the set of eval_particles. Note that all particles are
+        always used to calculate the coefficients. The default is to evaluate
+        all particles in `coordinates`.
+    periodic_boundary : bool, optional
+        Whether the box has periodic boundary conditions. If True, the boundary
+        must be given. The default is False.
+    basis_function : ['constant', 'linear']
+        the type of basis functions to use, where `'constant'` uses square wave
+        basis functions which assume the force is constant over each bin, and 
+        `'linear'` uses linear wave basis functions where each pair contributes
+        to the nearby bins with linearly interpolated weights. The default is 
+        `'constant'`.
+    remove_near_boundary : bool, optional
+        If true, particles which are closer than rmax from any of the
+        boundaries are not analyzed, but still accounted for when analyzing
+        particles closer to the center of the box in order to only analyze 
+        particles for which the full spherical shell up to rmax is within the 
+        box of coordinates, and to prevent erroneous handling of particles
+        which interact with other particles outside the measurement volume.
+        Only possible when periodic_boundary=False. The default is True.
+    neighbour_upper_bound : int
+        upper bound on the number of neighbours within rmax a particle may have
+        to limit memory use and computing time in the pair finding step. The
+        default is the total number of particles in each time step.
+
+    Returns
+    -------
+    G : numpy.array of length M
+        discretized force vector, the result of the computation.
+    G_err : numpy.array of length M
+        errors in G based on the least_squares solution of the matrix equation
+    counts : numpy.array of length M
+        number of individual force evaluations contributing to the result in
+        each bin.
+        
+    References
+    ----------
+    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction
+    potentials from arbitrary multi-particle trajectory data. Soft Matter, 11
+    (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
+
+    """
     if periodic_boundary and boundary is None:
         raise ValueError('when periodic_boundary=True, boundary must be '
                              'given')
