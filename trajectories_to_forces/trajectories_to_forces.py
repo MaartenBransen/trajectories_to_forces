@@ -8,6 +8,109 @@ import numba as nb
 
 #%% private definitions
 
+def _check_inputs(coordinates,times,boundary,pos_cols,eval_particles):
+    """checks the format of the input, i.e. if coordinates/times match and give 
+    a single timeseries (nested=False) or multiple sequences of consecutive 
+    steps (nested=True), if eval_particles are used and if the boundary 
+    conditions match the data."""
+    #check if one list or nested list, if not make it nested
+    if isinstance(times[0],(list,np.ndarray)):
+        nested = True
+        nsteps = len(times)
+        
+        #perform checks to see if shapes/lengths of inputs match
+        if not isinstance(coordinates[0],(list,np.ndarray)):
+            raise ValueError('`coordinates` must be nested list if `times` is')
+        if len(coordinates) != nsteps:
+            raise ValueError('number of subsets in `times` and `coordinates` '
+                             'must match')
+        if any([len(coord)!=len(t) for coord,t in zip(coordinates,times)]):
+            raise ValueError('length of each subset in `times` and '
+                             '`coordinates` must match')
+        if any([len(t) <= 1 for t in times]):
+            raise ValueError('each subset in `times` and `coordinates` must '
+                             'have at least 2 elements')
+        if not eval_particles is None:
+            if any(isinstance(ep,(list,set,np.ndarray)) \
+                   for ep in eval_particles):
+                if len(eval_particles) != nsteps:
+                    raise ValueError('length of `times` and `eval_particles'
+                                     ' must match')
+            elif len(eval_particles)!=nsteps or \
+                any(not ep is None for ep in eval_particles):
+                eval_particles = repeat(eval_particles)
+        else:
+            eval_particles = repeat(None)
+        
+    else:
+        nested = False
+        if len(times) <= 1:
+            raise ValueError('must be at least 2 time steps in a series')
+        times = [times]
+        coordinates = [coordinates]
+        eval_particles = [eval_particles]
+    
+    #get dimensionality from pos_cols, check names
+    pos_cols = list(pos_cols)
+    ndims = len(pos_cols)
+    
+    #get default boundaries from min and max values in any coordinate set
+    if boundary is None:
+        boundary = [
+            [
+                repeat([
+                    min([c[dim].min() for c in coords]),
+                    max([c[dim].max() for c in coords])
+                ]) for dim in pos_cols
+            ] for coords in coordinates
+        ]
+        
+    #otherwise check inputs
+    elif nested:
+        #if single boundary for whole set given, make boundary iterable on a 
+        #per timestep per coordinate set basis
+        if np.array(boundary[0]).ndim == 1:
+            if len(boundary) != ndims:
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = repeat(repeat(boundary))
+        
+        #else check if length matches
+        elif len(boundary) != nsteps:
+            raise ValueError('length of `boundary` and `coordinates` must '
+                             'match')
+        
+        #if single boundary per coordinate set given
+        elif np.array(boundary[0]).ndim == 2:
+            #check dimensionality of each item
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            #make iterable on a per timestep basis
+            boundary = [repeat(bounds) for bounds in boundary]
+            
+        #if boundary for each timestep check lengths and dimensionality
+        elif any([len(bounds) != len(time) \
+                  for bounds,time in zip(boundary,times)]):
+            raise ValueError('number of items in each item in `boundary` must '
+                             'match that in `times`')
+        elif any([np.array(bounds).shape[1] != ndims for bounds in boundary]):
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+    
+    #if not nested, make nested with single item per list for later iterating
+    else:
+        if np.array(boundary[0]).ndim == 2:
+            if any([len(bounds) != ndims for bounds in boundary]):
+                raise ValueError('number of `pos_cols` does not match '
+                                 '`boundary`')
+            boundary = [boundary]
+        elif len(boundary) != ndims:
+            raise ValueError('number of `pos_cols` does not match `boundary`')
+        else:
+            boundary = [repeat(boundary)]
+    
+    return coordinates,times,eval_particles,nested
+
 def _nwise(iterable, n=2):
     """
     Loops over sets of n subsequent items of an iterable. For example n=2:
@@ -196,13 +299,13 @@ def _calculate_forces_inertial(coords0,coords1,coords2,dt,boundary,pos_cols,
 
 
 @nb.njit(parallel=False)
-def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
-                              rmax,m):
+def _coefficient_loop(particles,queryparticles,ndims,dist,indices,mask,
+                              rmax,M):
     """loop over all pairs found by KDTree.query and calculate coefficients"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m))
-    counter = np.zeros(m)
-    binmeanpos = np.zeros(m)
+    coefficients = np.zeros((ndims*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmeanpos = np.zeros(M)
     imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
@@ -210,23 +313,23 @@ def _coefficient_pair_loop_nb(particles,queryparticles,ndims,dist,indices,mask,
         for j in range(jmax):
             if not mask[i,j]:
                 d = dist[i,j]
-                counter[int(d/rmax*m)] += 1
-                binmeanpos[int(d/rmax*m)] += d
+                counter[int(d/rmax*M)] += 1
+                binmeanpos[int(d/rmax*M)] += d
                 for dim in range(ndims):
-                    coefficients[ndims*i+dim,int(d/rmax*m)] += \
+                    coefficients[ndims*i+dim,int(d/rmax*M)] += \
                         (queryparticles[i,dim]-particles[indices[i,j],dim])/d
     
     return coefficients,counter,binmeanpos
 
 @nb.njit(parallel=False)
-def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
-                                     indices,mask,rmax,m):
+def _coefficient_loop_linear(particles,queryparticles,ndims,dist,
+                                     indices,mask,rmax,M):
     """loop over all pairs found by KDTree.query and calculate coefficients
     using linear basis functions"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m+1))
-    counter = np.zeros(m+1)
-    binmeanpos = np.zeros(m+1)
+    coefficients = np.zeros((ndims*len(queryparticles),M+1))
+    counter = np.zeros(M+1)
+    binmeanpos = np.zeros(M+1)
     imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
@@ -234,8 +337,8 @@ def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
         for j in range(jmax):
             if not mask[i,j]:
                 d = dist[i,j]
-                lb = int(d/rmax*m) #floor division gives nearest bin on left
-                phi = np.array([1-d/rmax*m+lb, 1+d/rmax*m-(lb+1)])
+                lb = int(d/rmax*M) #floor division gives nearest bin on left
+                phi = np.array([1-d/rmax*M+lb, 1+d/rmax*M-(lb+1)])
                 counter[lb] += phi[0]
                 counter[lb+1] += phi[1]
                 binmeanpos[lb] += d*phi[0]
@@ -249,23 +352,23 @@ def _coefficient_pair_loop_linear_nb(particles,queryparticles,ndims,dist,
     return coefficients[:,:-1],counter[:-1],binmeanpos[:-1]
 
 @nb.njit(parallel=False)
-def _bruteforce_pair_loop_nb(particles,queryparticles,ndims,rmax,m):
+def _bruteforce_pair_loop(particles,queryparticles,ndims,rmax,M):
     """loop over all pairs with i from queryparticles and j from particles, and
     calculate coefficients"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m))
-    counter = np.zeros(m)
-    binmeanpos = np.zeros(m)
+    coefficients = np.zeros((ndims*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmeanpos = np.zeros(M)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
         for j in range(len(particles)):
             d = np.sum((queryparticles[i]-particles[j])**2)**0.5
             if d < rmax and d != 0:
-                counter[int(d/rmax*m)] += 1
-                binmeanpos[int(d/rmax*m)] += d
+                counter[int(d/rmax*M)] += 1
+                binmeanpos[int(d/rmax*M)] += d
                 for dim in range(ndims):
-                    coefficients[ndims*i+dim,int(d/rmax*m)] += \
+                    coefficients[ndims*i+dim,int(d/rmax*M)] += \
                         (queryparticles[i,dim]-particles[j,dim])/d
 
     return coefficients,counter,binmeanpos
@@ -286,88 +389,88 @@ def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
     return distances
 
 @nb.njit(parallel=False)
-def _coefficient_pair_loop_periodic_nb(particles,queryparticles,ndims,dist,
-                                       indices,mask,rmax,m,boxmin,boxmax):
+def _coefficient_loop_periodic(particles,queryparticles,ndims,dist,
+                                       indices,mask,rmax,M,boxmin,boxmax):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m))
-    counter = np.zeros(m)
-    binmeanpos = np.zeros(m)
+    coefficients = np.zeros((ndims*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmeanpos = np.zeros(M)
     imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
     for i in nb.prange(imax):
         for j in range(jmax):
             if not mask[i,j]:
-                d_xyz = _distance_periodic_wrap(
+                d_zyx = _distance_periodic_wrap(
                     queryparticles[i],particles[indices[i,j]],boxmin,boxmax
                 )
                 d = dist[i,j]
-                counter[int(d/rmax*m)] += 1
-                binmeanpos[int(d/rmax*m)] += d
+                counter[int(d/rmax*M)] += 1
+                binmeanpos[int(d/rmax*M)] += d
                 for dim in range(ndims):
-                    coefficients[ndims*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
+                    coefficients[ndims*i+dim,int(d/rmax*M)] += d_zyx[dim]/d
 
     return coefficients,counter,binmeanpos
 
 @nb.njit(parallel=False)
-def _coefficient_pair_loop_periodic_linear_nb(particles,queryparticles,ndims,
-        dist,indices,mask,rmax,m,boxmin,boxmax):
+def _coefficient_loop_periodic_linear(particles,queryparticles,ndims,
+        dist,indices,mask,rmax,M,boxmin,boxmax):
     """loop over all pairs found by KDTree.query and calculate coefficients
     in periodic boundary conditions using linear basis functions"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m+1))
-    counter = np.zeros(m+1)
-    binmeanpos = np.zeros(m+1)
+    coefficients = np.zeros((ndims*len(queryparticles),M+1))
+    counter = np.zeros(M+1)
+    binmeanpos = np.zeros(M+1)
     imax,jmax = dist.shape
     
     #loop over pairs in distance/indices array
     for i in nb.prange(imax):
         for j in range(jmax):
             if not mask[i,j]:
-                d_xyz = _distance_periodic_wrap(
+                d_zyx = _distance_periodic_wrap(
                     queryparticles[i],particles[indices[i,j]],boxmin,boxmax
                 )
                 d = dist[i,j]
-                lb = int(d/rmax*m) #floor division gives nearest bin on left
-                phi = [1-d/rmax*m+lb, d/rmax*m-lb]
+                lb = int(d/rmax*M) #floor division gives nearest bin on left
+                phi = [1-d/rmax*M+lb, d/rmax*M-lb]
                 counter[lb] += phi[0]
                 counter[lb+1] += phi[1]
                 binmeanpos[lb] += d*phi[0]
                 binmeanpos[lb+1] += d*phi[1]
                 for dim in range(ndims):
-                    coefficients[ndims*i+dim,lb] += phi[0]*d_xyz[dim]/d
-                    coefficients[ndims*i+dim,lb+1] += phi[1]*d_xyz[dim]/d
+                    coefficients[ndims*i+dim,lb] += phi[0]*d_zyx[dim]/d
+                    coefficients[ndims*i+dim,lb+1] += phi[1]*d_zyx[dim]/d
     
     return coefficients[:,:-1],counter[:-1],binmeanpos[:-1]
 
 @nb.njit(parallel=False)
-def _bruteforce_pair_loop_periodic_nb(particles,queryparticles,ndims,rmax,m,
+def _bruteforce_pair_loop_periodic(particles,queryparticles,ndims,rmax,M,
                                       boxmin,boxmax):
     """loop over all pairs with i from queryparticles and j from particles, and
     calculate coefficients in periodic boundary conditions"""
     #allocate memory for coefficient matrix
-    coefficients = np.zeros((ndims*len(queryparticles),m))
-    counter = np.zeros(m)
-    binmeanpos = np.zeros(m)
+    coefficients = np.zeros((ndims*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmeanpos = np.zeros(M)
     
     #loop over pairs in distance/indices array
     for i in nb.prange(len(queryparticles)):
         for j in range(len(particles)):
-            d_xyz = _distance_periodic_wrap(
+            d_zyx = _distance_periodic_wrap(
                 queryparticles[i],particles[j],boxmin,boxmax
             )
-            d = np.sum(d_xyz**2)**0.5
+            d = np.sum(d_zyx**2)**0.5
             if d < rmax and d != 0:
-                counter[int(d/rmax*m)] += 1
-                binmeanpos[int(d/rmax*m)] += d
+                counter[int(d/rmax*M)] += 1
+                binmeanpos[int(d/rmax*M)] += d
                 for dim in range(ndims):
-                    coefficients[ndims*i+dim,int(d/rmax*m)] += d_xyz[dim]/d
+                    coefficients[ndims*i+dim,int(d/rmax*M)] += d_zyx[dim]/d
 
     return coefficients,counter,binmeanpos
 
-def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
+def _calculate_coefficients(coords,query_indices,rmax,M,boundary,pos_cols,
         periodic_boundary=False,bruteforce=False,basis_function='constant',
         neighbour_upper_bound=None):
     """
@@ -393,9 +496,9 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
         those not in `query_indices`).
     rmax : float
         cut-off radius up to which to calculate the coefficients.
-    m : int
+    M : int
         number of discretization steps to bin the matrix into. The bin with
-        will be rmax/m.
+        will be rmax/M.
     boundary : list or tuple
         boundaries of the box in which the coordinates are defined in the form
         ((d0_min,d0_max),(d1_min,d1_max),...) with a length (number) and order 
@@ -421,9 +524,9 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
     Returns
     -------
     coefficients : array
-        an array containing the 3n by m matric of coefficients, where n is
+        an array containing the 3n by M matric of coefficients, where n is
         the number of particles
-    counter : list of length m
+    counter : list of length M
         total number of pair counts for each column in the matrix
 
     """
@@ -450,8 +553,8 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
         
         #optionally use (inefficient) brute-force search through all pairs
         if bruteforce:
-            coefficients,counter,binmeanpos = _bruteforce_pair_loop_periodic_nb(
-                particles,queryparticles,ndims,rmax,m,boxmin,boxmax)
+            coefficients,counter,binmeanpos = _bruteforce_pair_loop_periodic(
+                particles,queryparticles,ndims,rmax,M,boxmin,boxmax)
         
         #else use KDTree based efficient neighbour searching algorithm
         else:
@@ -476,23 +579,23 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             #perform numba-optimized loop over particle pairs
             if basis_function == 'constant':
                 coefficients,counter,binmeanpos = \
-                    _coefficient_pair_loop_periodic_nb(
+                    _coefficient_loop_periodic(
                         particles,queryparticles,ndims,dist,indices,mask,rmax,
-                        m,boxmin,boxmax
+                        M,boxmin,boxmax
                     )
             elif basis_function == 'linear':
                 coefficients,counter,binmeanpos = \
-                    _coefficient_pair_loop_periodic_linear_nb(
+                    _coefficient_loop_periodic_linear(
                         particles,queryparticles,ndims,dist,indices,mask,rmax,
-                        m,boxmin,boxmax
+                        M,boxmin,boxmax
                     )
     
     #no periodic boundary conditions
     else:
         #optionally use (inefficient) brute-force search through all pairs
         if bruteforce:
-            coefficients,counter,binmeanpos = _bruteforce_pair_loop_nb(
-                particles,queryparticles,rmax,m
+            coefficients,counter,binmeanpos = _bruteforce_pair_loop(
+                particles,queryparticles,rmax,M
             )
         
         #use KDTree based efficient neighbour searching algorithm
@@ -512,16 +615,19 @@ def _calculate_coefficients(coords,query_indices,rmax,m,boundary,pos_cols,
             #perform numba-optimized loop over particle pairs
             if basis_function == 'constant':
                 coefficients,counter,binmeanpos = \
-                    _coefficient_pair_loop_nb(
-                        particles,queryparticles,ndims,dist,indices,mask,rmax,m
+                    _coefficient_loop(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,M
                     )
             elif basis_function == 'linear':
                 coefficients,counter,binmeanpos = \
-                    _coefficient_pair_loop_linear_nb(
-                        particles,queryparticles,ndims,dist,indices,mask,rmax,m
+                    _coefficient_loop_linear(
+                        particles,queryparticles,ndims,dist,indices,mask,rmax,M
                     )
 
     return coefficients,counter,binmeanpos
+
+
+
 
 #%% public definitions
 
@@ -712,7 +818,7 @@ def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
         
     return indices,msds
 
-def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
+def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,bruteforce=False,
                    remove_near_boundary=True,solve_per_dim=False,
@@ -745,7 +851,7 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     rmax : float, optional
         cut-off radius for calculation of the pairwise forces. The default is
         1.
-    m : int, optional
+    M : int, optional
         The number of discretization steps for the force profile, i.e. the
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
@@ -780,14 +886,14 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 
     Returns
     -------
-    G : numpy.array of length m
+    G : numpy.array of length M
         discretized force vector, the result of the computation.
-    G_err : numpy.array of length m
+    G_err : numpy.array of length M
         errors in G based on the least_squares solution of the matrix equation
-    counts : numpy.array of length m
+    counts : numpy.array of length M
         number of individual force evaluations contributing to the result in
         each bin.
-    coefficients : numpy.array of m by 3n*(len(times)-1)
+    coefficients : numpy.array of M by 3n*(len(times)-1)
         coefficient matrix of the full dataset as specified in [1]. This is 
         only returned when `return_data=True`
     forces : numpy.array of length 3n*(len(times)-1)
@@ -990,7 +1096,7 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                     coords0.loc[set(coords0.index).intersection(coords1.index)],
                     set(selected).intersection(coords1.index),
                     rmax,
-                    m,
+                    M,
                     bound0,
                     pos_cols,
                     bruteforce=bruteforce,
@@ -1050,7 +1156,7 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     else:
         return G,G_err,counts
     
-def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
+def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
                    pos_cols=('z','y','x'),eval_particles=None,
                    periodic_boundary=False,basis_function='constant',
                    bruteforce=False,remove_near_boundary=True,
@@ -1083,7 +1189,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     rmax : float, optional
         cut-off radius for calculation of the pairwise forces. The default is
         1.
-    m : int, optional
+    M : int, optional
         The number of discretization steps for the force profile, i.e. the
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
@@ -1118,11 +1224,11 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
 
     Returns
     -------
-    G : numpy.array of length m
+    G : numpy.array of length M
         discretized force vector, the result of the computation.
-    G_err : numpy.array of length m
+    G_err : numpy.array of length M
         errors in G based on the least_squares solution of the matrix equation
-    counts : numpy.array of length m
+    counts : numpy.array of length M
         number of individual force evaluations contributing to the result in
         each bin.
         
@@ -1238,13 +1344,13 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
         
     #initialize matrices for least squares solving
     if solve_per_dim:
-        X = [np.zeros((m,m)) for _ in range(ndims)]
-        Y = [np.zeros((m)) for _ in range(ndims)]
+        X = [np.zeros((M,M)) for _ in range(ndims)]
+        Y = [np.zeros((M)) for _ in range(ndims)]
     else:
-        X = np.zeros((m,m)) #C dot C.T
-        Y = np.zeros((m)) #C.T dot f
-    counts = np.zeros((m))
-    binmeanpos = np.zeros((m))
+        X = np.zeros((M,M)) #C dot C.T
+        Y = np.zeros((M)) #C.T dot f
+    counts = np.zeros((M))
+    binmeanpos = np.zeros((M))
     
     #loop over separate sets of coordinates
     for i,(coords,bounds,tsteps,eval_parts) in \
@@ -1337,7 +1443,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
                 ],
                 set(selected).intersection(coords1.index),
                 rmax,
-                m,
+                M,
                 bound0,
                 pos_cols,
                 bruteforce=bruteforce,
@@ -1382,7 +1488,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     #solve eq. 15 from the paper for all dimensions together
     else:
         #initialize result and error vectors
-        G,G_err = np.empty(m),np.empty(m)
+        G,G_err = np.empty(M),np.empty(M)
         G[counts==0] = np.nan
         G_err[counts==0] = np.nan
         
@@ -1404,7 +1510,7 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,m=20,
     return G,G_err,counts,binmeanpos
 
 
-def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
+def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,M=20,
                pos_cols=['z','y','x'],periodic_boundary=False,bruteforce=False,
                remove_near_boundary=False,solve_per_dim=False,
                return_data=False,neighbour_upper_bound=None,):
@@ -1440,7 +1546,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     rmax : float, optional
         cut-off radius for calculation of the pairwise forces. The default is
         1.
-    m : int, optional
+    M : int, optional
         The number of discretization steps for the force profile, i.e. the
         number of bins from 0 to rmax into which the data will be sorted. The
         default is 20.
@@ -1474,14 +1580,14 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
 
     Returns
     -------
-    G : numpy.array of length m
+    G : numpy.array of length M
         discretized force vector, the result of the computation.
-    G_err : numpy.array of length m
+    G_err : numpy.array of length M
         errors in G based on the least_squares solution of the matrix equation
-    counts : numpy.array of length m
+    counts : numpy.array of length M
         number of individual force evaluations contributing to the result in
         each bin.
-    coefficients : numpy.array of m by 3n*(len(times)-1)
+    coefficients : numpy.array of M by 3n*(len(times)-1)
         coefficient matrix of the full dataset as specified in [1]. This is 
         only returned when `return_data=True`
     forces : numpy.array of length 3n*(len(times)-1)
@@ -1623,7 +1729,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
                 set(selected).intersection(coords0.index).intersection(
                     coords2.index),
                 rmax,
-                m,
+                M,
                 bounds,
                 pos_cols,
                 bruteforce=bruteforce,
@@ -1671,3 +1777,438 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,m=20,
     else:
         return G,G_err,counts
 
+
+#%% cylindrical
+
+@nb.njit(parallel=False)
+def _coefficient_loop_cylindrical(
+        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
+    ):
+    """loop over all pairs found by KDTree.query and calculate coefficients"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_rho = np.zeros(M)
+    binmean_z = np.zeros(M)
+    imax,jmax = indices.shape
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                d_zyx = queryparticles[i]-particles[indices[i,j]]
+                d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
+                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_rho/rmax)
+                counter[m] += 1
+                binmean_rho[m] += d_rho
+                binmean_z[m] += abs(d_zyx[0])
+                
+                coefficients[3*i,m] += np.sign(d_zyx[0])#z is always +1 or -1
+                coefficients[3*i+1,m] += d_zyx[1]/d_rho#y
+                coefficients[3*i+2,m] += d_zyx[2]/d_rho#x
+    
+    return coefficients,counter,binmean_z,binmean_rho
+
+@nb.njit(parallel=False)
+def _coefficient_loop_cylindrical_linear(
+        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
+        boxmin,boxmax
+    ):
+    """loop over all pairs found by KDTree.query and calculate coefficients in 
+    periodic boundary conditions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_z = np.zeros(M)
+    binmean_rho = np.zeros(M)
+    imax,jmax = indices.shape
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                #calculate distances and bins
+                d_zyx = queryparticles[i]-particles[indices[i,j]]
+                d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
+                m_rho = int(d_rho*M_rho/rmax)
+                m_z = int(abs(d_zyx[0])*M_z/rmax)
+                
+                #calculate weights for the four corners of each bin
+                phi = [
+                    (1-d_rho*M_rho/rmax+m_rho)*(1-abs(d_zyx[0])*M_z/rmax+m_z),
+                    (d_rho*M_rho/rmax-m_rho)*(1-abs(d_zyx[0])*M_z/rmax+m_z),
+                    (1-d_rho*M_rho/rmax+m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z),
+                    (d_rho*M_rho/rmax-m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z)
+                ]
+                
+                #convert rho and z bins to M bins
+                bins = [
+                    m_rho   + M_rho*m_z,
+                    m_rho+1 + M_rho*m_z,
+                    m_rho   + M_rho*(m_z+1),
+                    m_rho+1 + M_rho*(m_z+1)
+                ]
+                
+                #assign values weighted by basis functions
+                counter[bins] += phi
+                binmean_rho[bins] += d_rho*phi
+                binmean_z[bins] += abs(d_zyx[0])*phi
+                coefficients[3*i,bins] += phi*np.sign(d_zyx[0])#z is +1 or -1
+                coefficients[3*i+1,bins] += phi*d_zyx[1]/d_rho#y
+                coefficients[3*i+2,bins] += phi*d_zyx[2]/d_rho#x
+    
+    return coefficients,counter,binmean_z,binmean_rho
+
+@nb.njit(parallel=False)
+def _coefficient_loop_cylindrical_periodic(
+        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
+        boxmin,boxmax
+    ):
+    """loop over all pairs found by KDTree.query and calculate coefficients in 
+    periodic boundary conditions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_z = np.zeros(M)
+    binmean_rho = np.zeros(M)
+    imax,jmax = indices.shape
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                d_zyx = _distance_periodic_wrap(
+                    queryparticles[i],particles[indices[i,j]],boxmin,boxmax
+                )
+                d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
+                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_rho/rmax)
+                counter[m] += 1
+                binmean_rho[m] += d_rho
+                binmean_z[m] += abs(d_zyx[0])
+
+                coefficients[3*i,m] += np.sign(d_zyx[0])#z is always +1 or -1
+                coefficients[3*i+1,m] += d_zyx[1]/d_rho#y
+                coefficients[3*i+2,m] += d_zyx[2]/d_rho#x
+                
+    return coefficients,counter,binmean_z,binmean_rho
+
+@nb.njit(parallel=False)
+def _coefficient_loop_cylindrical_periodic_linear(
+        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
+        boxmin,boxmax
+    ):
+    """loop over all pairs found by KDTree.query and calculate coefficients in 
+    periodic boundary conditions"""
+    #allocate memory for coefficient matrix
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_z = np.zeros(M)
+    binmean_rho = np.zeros(M)
+    imax,jmax = indices.shape
+    
+    #loop over pairs in distance/indices array
+    for i in nb.prange(imax):
+        for j in range(jmax):
+            if not mask[i,j]:
+                #calculate distances and bins
+                d_zyx = _distance_periodic_wrap(
+                    queryparticles[i],particles[indices[i,j]],boxmin,boxmax
+                )
+                d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
+
+                m_rho = int(d_rho*M_rho/rmax)
+                m_z = int(abs(d_zyx[0])*M_z/rmax)
+                #calculate weights for the four corners of each bin
+                phi = [
+                    (1-d_rho*M_rho/rmax+m_rho)*(1-abs(d_zyx[0])*M_z/rmax+m_z),
+                    (d_rho*M_rho/rmax-m_rho)*(1-abs(d_zyx[0])*M_z/rmax+m_z),
+                    (1-d_rho*M_rho/rmax+m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z),
+                    (d_rho*M_rho/rmax-m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z)
+                ]
+                #convert rho and z bins to M bins
+                bins = [
+                    m_rho   + M_rho*m_z,
+                    m_rho+1 + M_rho*m_z,
+                    m_rho   + M_rho*(m_z+1),
+                    m_rho+1 + M_rho*(m_z+1)
+                ]
+                #assign values weighted by basis functions
+                counter[bins] += phi
+                binmean_rho[bins] += d_rho*phi
+                binmean_z[bins] += abs(d_zyx[0])*phi
+                coefficients[3*i,bins] += phi*np.sign(d_zyx[0])#z is +1 or -1
+                coefficients[3*i+1,bins] += phi*d_zyx[1]/d_rho#y
+                coefficients[3*i+2,bins] += phi*d_zyx[2]/d_rho#x
+    
+    return coefficients,counter,binmean_z,binmean_rho
+
+def _calculate_coefficients_cylindrical(
+        coords,query_indices,rmax,M,M_rho,M_z,boundary,pos_cols,
+        periodic_boundary=False,basis_function='constant',
+        neighbour_upper_bound=None
+    ):
+    
+    #convert to numpy array with axes (particle,dim) and dim=[x,y,z]
+    coords.sort_index(inplace=True)
+    particles = coords[pos_cols].to_numpy()
+    queryparticles = coords.loc[sorted(query_indices)][pos_cols].to_numpy()
+    
+    #set maximum number of neighbours 1 particle may have within rmax
+    if neighbour_upper_bound is None:
+        neighbour_upper_bound = len(particles)
+    else:
+        neighbour_upper_bound = min([neighbour_upper_bound,len(particles)])
+    
+    #coefficient calculation in periodic boundary conditions
+    if periodic_boundary:
+        
+        boundary = np.array(boundary)
+        boxmin = boundary[:,0]
+        boxmax = boundary[:,1]
+        
+        #correct box and coordinates to have lower lim at 0 for cKDTree
+        particles -= boxmin
+        queryparticles -= boxmin
+        boxmax -= boxmin
+        boxmin -= boxmin
+        
+        #initialize and query periodic KDTree for pairs within rmax
+        tree = cKDTree(particles,boxsize=boxmax)
+        dist,indices = tree.query(
+            queryparticles,
+            k=neighbour_upper_bound,
+            distance_upper_bound=rmax,
+        )
+        
+        #remove pairs with self and np.inf fill values
+        dist, indices = dist[:,1:],indices[:,1:]
+        mask = np.isinf(dist)
+        
+        #perform numba-optimized loop over particle pairs
+        if basis_function == 'constant':
+            coefficients,counter,binmean_z,binmean_rho = \
+                _coefficient_loop_cylindrical_periodic(
+                    particles,queryparticles,indices,mask,rmax,
+                    M,M_rho,M_z,boxmin,boxmax
+                )
+        elif basis_function == 'linear':
+            raise NotImplementedError('linear basis functions in cylindrical'
+                                      'coordinates are not implemented yet')
+    
+    #no periodic boundary conditions
+    else:
+
+        #initialize and query KDTree for fast pairfinding
+        tree = cKDTree(particles)
+        dist,indices = tree.query(
+            queryparticles,
+            k=neighbour_upper_bound,
+            distance_upper_bound=rmax,
+        )
+        
+        #remove pairs with self and np.inf fill values
+        dist, indices = dist[:,1:], indices[:,1:]
+        mask = np.isinf(dist)
+
+        #perform numba-optimized loop over particle pairs
+        if basis_function == 'constant':
+            coefficients,counter,binmean_z,binmean_rho = \
+                _coefficient_loop_cylindrical(
+                    particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
+                )
+        elif basis_function == 'linear':
+            raise NotImplementedError('linear basis functions in cylindrical'
+                                      'coordinates are not implemented yet')
+
+    return coefficients,counter,binmean_z,binmean_rho
+
+def run_overdamped_cylindrical(
+        coordinates,times,boundary=None,gamma=1,rmax=1,M_z=20,M_rho=20,
+        pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
+        basis_function='constant',remove_near_boundary=True,
+        neighbour_upper_bound=None
+    ):
+
+    if periodic_boundary and boundary is None:
+        raise ValueError('when periodic_boundary=True, boundary must be '
+                             'given')
+    
+    #get dimensionality from pos_cols, must be 3D for cylindrical
+    pos_cols = list(pos_cols)
+    ndims = len(pos_cols)
+    if ndims != 3:
+        raise NotImplementedError('cylindrical coordinates only implemented in'
+                                  '3 dimensions')
+    
+    #check the inputs
+    coordinates, times, boundary, eval_particles, nested = \
+        _check_inputs(coordinates, times, boundary, pos_cols, eval_particles)
+    nsteps = len(times)
+        
+    #initialize matrices for least squares solving
+    M = M_rho*M_z
+    X_z,X_rho = np.zeros((M,M)),np.zeros((M,M)) #C dot C.T
+    Y_z,Y_rho = np.zeros((M)),np.zeros((M)) #C.T dot f
+    counts = np.zeros((M))
+    binmean_z = np.zeros((M))
+    binmean_rho = np.zeros((M))
+    
+    #loop over separate sets of coordinates
+    for i,(coords,bounds,tsteps,eval_parts) in \
+        enumerate(zip(coordinates,boundary,times,eval_particles)):
+        
+        #get number of timestep
+        nt = len(tsteps)
+        
+        #make sure eval_parts is a set
+        if not eval_parts is None and type(eval_parts) != set:
+            eval_parts = set(eval_parts)
+        
+        #check data
+        if nt != len(coords):
+            raise ValueError('length of timesteps does not match coordinate '
+                             'data')
+        
+        #loop over all sets of two coordinate arrays
+        for j,((coords0,bound0,t0),(coords1,_,t1)) in \
+            enumerate(_nwise(zip(coords,bounds,tsteps),n=2)):
+                
+            #print progress
+            if nested:
+                print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '
+                       '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-1,
+                                                    t0,t1),end='',flush=True)
+            else:
+                print(('\revaluating step {:d} of {:d} (time: {:.5f} to '
+                       '{:.5f})').format(j+1,nt-1,t0,t1),end='',flush=True)
+            
+            #assure boundary is array
+            bound0 = np.array(bound0)
+            
+            #find the particles which are far enough from boundary
+            if remove_near_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError(
+                        'when remove_near_boundary=True, rmax cannot be more '
+                        'than half the smallest box dimension. Use rmax < '
+                        '{:}'.format(min(bound0[:,1]-bound0[:,0])/2)
+                    )
+                
+                selected = set(coords0.loc[(
+                    (coords0[pos_cols] >= bound0[:,0]+rmax).all(axis=1) &
+                    (coords0[pos_cols] <  bound0[:,1]-rmax).all(axis=1)
+                )].index)
+                
+            else:
+                selected = set(coords0.index)
+            
+            if not eval_parts is None:
+                selected = selected.intersection(eval_parts)
+            
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '
+                        'cannot be more than half the smallest box dimension')
+                
+                #remove any items outside of boundaries
+                mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
+                    (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
+                if mask.any():
+                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'
+                          ' some coordinates are outside of boundary and will'
+                          ' be removed')
+                    coords0 = coords0.loc[~mask]
+                        
+    
+            #calculate the force vector containin the total force acting on 
+            #each particle
+            f = _calculate_forces_overdamped(
+                coords0.loc[sorted(selected)],
+                coords1,
+                t1-t0,
+                bound0,
+                pos_cols,
+                gamma=gamma,
+                periodic_boundary=periodic_boundary,
+            ).sort_index()
+            
+            #reshape f to 3n vector and add to total vector
+            f = f[pos_cols].to_numpy().ravel()
+    
+            #find neighbours and coefficients at time t0 for all particles 
+            #present in t0 and t1
+            C,c,bmp_z,bmp_rho = _calculate_coefficients_cylindrical(
+                coords0.loc[
+                    list(set(coords0.index).intersection(coords1.index))
+                ],
+                set(selected).intersection(coords1.index),
+                rmax,
+                M,
+                bound0,
+                pos_cols,
+                periodic_boundary=periodic_boundary,
+                basis_function=basis_function,
+                neighbour_upper_bound=neighbour_upper_bound,
+            )
+            
+            #precalculate dot products per force dimension
+            mask = np.arange(len(f)) %3 == 0#true for z dim, false for y and x
+            X_z += np.dot(C[mask].T,C[mask])
+            Y_z += np.dot(C[mask].T,f[mask])
+            X_rho += np.dot(C[~mask].T,C[~mask])
+            Y_rho += np.dot(C[~mask].T,f[~mask])
+            
+            #update counter and mean bin positions
+            counts += c
+            binmean_rho += bmp_rho
+            binmean_z += bmp_z
+        
+        #newline between steps
+        if nested:
+            print()
+    
+    if nested:
+        print('solving matrix equation')
+    else:
+        print('\nsolving matrix equation')
+    
+    #remove bins with zero data
+    mask = counts>0
+    X_z = X_z[mask][:,mask]
+    Y_z = Y_z[mask]
+    X_rho = X_rho[mask][:,mask]
+    Y_rho = Y_rho[mask]
+    
+    #initialize result vector and solve for least squares solution
+    G_z = np.empty(M)
+    G_z[~mask] = np.nan
+    G_rho = G_z.copy()
+    G_z[mask] = np.dot(np.linalg.inv(X_z),Y_z)
+    G_rho[mask] = np.dot(np.linalg.inv(X_rho),Y_rho)
+    
+    #calculate error
+    G_z_err, = np.empty(M),np.empty(M)
+    G_z_err[~mask] = np.nan
+    G_rho_err = G_z_err.copy()
+    G_z_err[mask] = Y_z - np.dot(X_z,G_z[mask])
+    G_rho_err[mask] = Y_rho - np.dot(X_rho,G_rho[mask])
+    
+    #calculate mean position in each bin
+    binmean_rho[~mask] = np.nan
+    binmean_z[~mask] = np.nan
+    binmean_rho /= counts
+    binmean_z /= counts
+    
+    #provide bin indices and reshape for convenience
+    m_rho,m_z = np.meshgrid(range(M_rho),range(M_z))
+    G_z.shape = (M_z,M_rho)
+    G_rho.shape = (M_z,M_rho)
+    G_z_err.shape = (M_z,M_rho)
+    G_rho_err.shape = (M_z,M_rho)
+    binmean_z.shape = (M_z,M_rho)
+    binmean_rho.shape = (M_z,M_rho)
+    counts.shape = (M_z,M_rho)
+    
+    print('done')
+    return m_z,m_rho,G_z,G_rho,G_z_err,G_rho_err,binmean_z,binmean_rho,counts
