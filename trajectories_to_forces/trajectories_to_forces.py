@@ -109,7 +109,7 @@ def _check_inputs(coordinates,times,boundary,pos_cols,eval_particles):
         else:
             boundary = [repeat(boundary)]
     
-    return coordinates,times,eval_particles,nested
+    return coordinates,times,boundary,eval_particles,nested
 
 def _nwise(iterable, n=2):
     """
@@ -1247,6 +1247,10 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     counts : numpy.array of length M
         number of individual force evaluations contributing to the result in
         each bin.
+    mean_rho : numpy.array of length M
+        the average interparticle distance of all particle pairs contributing 
+        to each bin, i.e. the mean of the distances for which the forces were 
+        evaluated.
         
     References
     ----------
@@ -1723,7 +1727,7 @@ def _coefficient_loop_cylindrical(
             if not mask[i,j]:
                 d_zyx = queryparticles[i]-particles[indices[i,j]]
                 d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
-                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_rho/rmax)
+                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_z/rmax)
                 counter[m] += 1
                 binmean_rho[m] += d_rho
                 binmean_z[m] += abs(d_zyx[0])
@@ -1741,11 +1745,11 @@ def _coefficient_loop_cylindrical_linear(
     ):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
-    #allocate memory for coefficient matrix
-    coefficients = np.zeros((3*len(queryparticles),M))
-    counter = np.zeros(M)
-    binmean_z = np.zeros(M)
-    binmean_rho = np.zeros(M)
+    #allocate memory for coefficient matrix,add extra row and col above rmax
+    coefficients = np.zeros((3*len(queryparticles),M+M_rho+M_z+1))
+    counter = np.zeros(M+M_rho+M_z+1)
+    binmean_z = np.zeros(M+M_rho+M_z+1)
+    binmean_rho = np.zeros(M+M_rho+M_z+1)
     imax,jmax = indices.shape
     
     #loop over pairs in distance/indices array
@@ -1757,7 +1761,6 @@ def _coefficient_loop_cylindrical_linear(
                 d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
                 m_rho = int(d_rho*M_rho/rmax)
                 m_z = int(abs(d_zyx[0])*M_z/rmax)
-                
                 #calculate weights for the four corners of each bin
                 phi = [
                     (1-d_rho*M_rho/rmax+m_rho)*(1-abs(d_zyx[0])*M_z/rmax+m_z),
@@ -1765,22 +1768,26 @@ def _coefficient_loop_cylindrical_linear(
                     (1-d_rho*M_rho/rmax+m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z),
                     (d_rho*M_rho/rmax-m_rho)*(abs(d_zyx[0])*M_z/rmax-m_z)
                 ]
-                
                 #convert rho and z bins to M bins
                 bins = [
-                    m_rho   + M_rho*m_z,
-                    m_rho+1 + M_rho*m_z,
-                    m_rho   + M_rho*(m_z+1),
-                    m_rho+1 + M_rho*(m_z+1)
+                    m_rho   + (M_rho+1)*m_z,
+                    m_rho+1 + (M_rho+1)*m_z,
+                    m_rho   + (M_rho+1)*(m_z+1),
+                    m_rho+1 + (M_rho+1)*(m_z+1)
                 ]
-                
                 #assign values weighted by basis functions
-                counter[bins] += phi
-                binmean_rho[bins] += d_rho*phi
-                binmean_z[bins] += abs(d_zyx[0])*phi
-                coefficients[3*i,bins] += phi*np.sign(d_zyx[0])#z is +1 or -1
-                coefficients[3*i+1,bins] += phi*d_zyx[1]/d_rho#y
-                coefficients[3*i+2,bins] += phi*d_zyx[2]/d_rho#x
+                for k in range(4):
+                    counter[bins[k]] += phi[k]
+                    binmean_rho[bins[k]] += d_rho*phi[k]
+                    binmean_z[bins[k]] += abs(d_zyx[0])*phi[k]
+                    coefficients[3*i,bins[k]] += phi[k]*np.sign(d_zyx[0])#z
+                    coefficients[3*i+1,bins[k]] += phi[k]*d_zyx[1]/d_rho#y
+                    coefficients[3*i+2,bins[k]] += phi[k]*d_zyx[2]/d_rho#x
+    
+    coefficients = coefficients.reshape((3*len(queryparticles),M_z+1,M_rho+1))[:,:-1,:-1].reshape(3*len(queryparticles),M)
+    counter = counter.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
+    binmean_z = binmean_z.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
+    binmean_rho = binmean_rho.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
     
     return coefficients,counter,binmean_z,binmean_rho
 
@@ -1806,7 +1813,7 @@ def _coefficient_loop_cylindrical_periodic(
                     queryparticles[i],particles[indices[i,j]],boxmin,boxmax
                 )
                 d_rho = (d_zyx[1]**2+d_zyx[2]**2)**0.5
-                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_rho/rmax)
+                m = int(d_rho*M_rho/rmax) + M_rho*int(abs(d_zyx[0])*M_z/rmax)
                 counter[m] += 1
                 binmean_rho[m] += d_rho
                 binmean_z[m] += abs(d_zyx[0])
@@ -1824,11 +1831,11 @@ def _coefficient_loop_cylindrical_periodic_linear(
     ):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
-    #allocate memory for coefficient matrix
-    coefficients = np.zeros((3*len(queryparticles),M))
-    counter = np.zeros(M)
-    binmean_z = np.zeros(M)
-    binmean_rho = np.zeros(M)
+    #allocate memory for coefficient matrix,add extra row and col above rmax
+    coefficients = np.zeros((3*len(queryparticles),M+M_rho+M_z+1))
+    counter = np.zeros(M+M_rho+M_z+1)
+    binmean_z = np.zeros(M+M_rho+M_z+1)
+    binmean_rho = np.zeros(M+M_rho+M_z+1)
     imax,jmax = indices.shape
     
     #loop over pairs in distance/indices array
@@ -1852,23 +1859,26 @@ def _coefficient_loop_cylindrical_periodic_linear(
                 ]
                 #convert rho and z bins to M bins
                 bins = [
-                    m_rho   + M_rho*m_z,
-                    m_rho+1 + M_rho*m_z,
-                    m_rho   + M_rho*(m_z+1),
-                    m_rho+1 + M_rho*(m_z+1)
+                    m_rho   + (M_rho+1)*m_z,
+                    m_rho+1 + (M_rho+1)*m_z,
+                    m_rho   + (M_rho+1)*(m_z+1),
+                    m_rho+1 + (M_rho+1)*(m_z+1)
                 ]
                 #assign values weighted by basis functions
-                counter[bins] += phi
-                binmean_rho[bins] += d_rho*phi
-                binmean_z[bins] += abs(d_zyx[0])*phi
-                coefficients[3*i,bins] += phi*np.sign(d_zyx[0])#z is +1 or -1
-                coefficients[3*i+1,bins] += phi*d_zyx[1]/d_rho#y
-                coefficients[3*i+2,bins] += phi*d_zyx[2]/d_rho#x
+                for k in range(4):
+                    counter[bins[k]] += phi[k]
+                    binmean_rho[bins[k]] += d_rho*phi[k]
+                    binmean_z[bins[k]] += abs(d_zyx[0])*phi[k]
+                    coefficients[3*i,bins[k]] += phi[k]*np.sign(d_zyx[0])#z
+                    coefficients[3*i+1,bins[k]] += phi[k]*d_zyx[1]/d_rho#y
+                    coefficients[3*i+2,bins[k]] += phi[k]*d_zyx[2]/d_rho#x
     
+    #remove additional row and col
+    #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
     return coefficients,counter,binmean_z,binmean_rho
 
 def _calculate_coefficients_cylindrical(
-        coords,query_indices,rmax,M,M_rho,M_z,boundary,pos_cols,
+        coords,query_indices,rmax,M,M_z,M_rho,boundary,pos_cols,
         periodic_boundary=False,basis_function='constant',
         neighbour_upper_bound=None
     ):
@@ -1916,12 +1926,20 @@ def _calculate_coefficients_cylindrical(
         if basis_function == 'constant':
             coefficients,counter,binmean_z,binmean_rho = \
                 _coefficient_loop_cylindrical_periodic(
-                    particles,queryparticles,indices,mask,rmax,
-                    M,M_rho,M_z,boxmin,boxmax
+                    particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
+                    boxmin,boxmax
                 )
         elif basis_function == 'linear':
-            raise NotImplementedError('linear basis functions in cylindrical'
-                                      'coordinates are not implemented yet')
+            coefficients,counter,binmean_z,binmean_rho = \
+                _coefficient_loop_cylindrical_periodic_linear(
+                    particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
+                    boxmin,boxmax
+                )
+            mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
+            coefficients = coefficients[:,mask]
+            counter = counter[mask]
+            binmean_z = binmean_z[mask]
+            binmean_rho = binmean_rho[mask]
     
     #no periodic boundary conditions
     else:
@@ -1945,9 +1963,15 @@ def _calculate_coefficients_cylindrical(
                     particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
                 )
         elif basis_function == 'linear':
-            raise NotImplementedError('linear basis functions in cylindrical'
-                                      'coordinates are not implemented yet')
-
+            coefficients,counter,binmean_z,binmean_rho = \
+                _coefficient_loop_cylindrical_linear(
+                    particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
+                )
+            coefficients = coefficients[:,mask]
+            counter = counter[mask]
+            binmean_z = binmean_z[mask]
+            binmean_rho = binmean_rho[mask]
+                
     return coefficients,counter,binmean_z,binmean_rho
 
 def run_overdamped_cylindrical(
@@ -2025,20 +2049,35 @@ def run_overdamped_cylindrical(
 
     Returns
     -------
-    G : numpy.array of length M
-        discretized force vector, the result of the computation.
-    G_err : numpy.array of length M
-        errors in G based on the least_squares solution of the matrix equation
-    counts : numpy.array of length M
+    m_z : numpy.array of ints of shape (M_z,M_rho)
+        z axis bin indices corresponding to the data arrays.
+    m_rho : numpy.array of ints of shape (M_z,M_rho)
+        rho axis bin indices corresponding to the data arrays.
+    G_z : numpy.array of floats of shape (M_z,M_rho)
+        values for the axial (z) component of the force in each bin, i.e. the
+        magnitude associated with each basis function.
+    G_rho : numpy.array of floats of shape (M_z,M_rho)
+        values for the in-plane (rho) component of the force in each bin, i.e. 
+        the magnitude associated with each basis function.
+    G_z_err : numpy.array of floats of shape (M_z,M_rho)
+        residual least-squares error in each bin in G_z
+    G_rho_err : numpy.array of floats of shape (M_z,M_rho)
+        residual least-squares error in each bin in G_rho
+    mean_z : numpy.array of floats of shape (M_z,M_rho)
+        the average absolute z distance of all particle pairs contributing to 
+        each bin, i.e. the mean of the distances for which the forces were 
+        evaluated.
+    mean_rho : numpy.array of floats of shape (M_z,M_rho)
+        the average absolute planar (rho) distance of all particle pairs 
+        contributing to each bin, i.e. the mean of the distances for which the 
+        forces were evaluated.
+    counts : numpy.array of floats of shape (M_z,M_rho)
         number of individual force evaluations contributing to the result in
-        each bin.
+        each bin. When `basis_function='linear'` this is a total weight rather
+        than an integer count, since each particle pair has its unity weight
+        divided over the 4 surrounding bins.
         
-    References
-    ----------
-    [1] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). Interaction
-    potentials from arbitrary multi-particle trajectory data. Soft Matter, 11
-    (35), 6948–6956. https://doi.org/10.1039/C5SM01233C
-
+        m_z,m_rho,G_z,G_rho,G_z_err,G_rho_err,binmean_z,binmean_rho,counts
     """
     if periodic_boundary and boundary is None:
         raise ValueError('when periodic_boundary=True, boundary must be '
@@ -2156,13 +2195,15 @@ def run_overdamped_cylindrical(
                 set(selected).intersection(coords1.index),
                 rmax,
                 M,
+                M_z,
+                M_rho,
                 bound0,
                 pos_cols,
                 periodic_boundary=periodic_boundary,
                 basis_function=basis_function,
                 neighbour_upper_bound=neighbour_upper_bound,
             )
-            
+
             #precalculate dot products per force dimension
             mask = np.arange(len(f)) %3 == 0#true for z dim, false for y and x
             X_z += np.dot(C[mask].T,C[mask])
@@ -2199,11 +2240,11 @@ def run_overdamped_cylindrical(
     G_rho[mask] = np.dot(np.linalg.inv(X_rho),Y_rho)
     
     #calculate error
-    G_z_err, = np.empty(M),np.empty(M)
+    G_z_err = np.empty(M)
     G_z_err[~mask] = np.nan
     G_rho_err = G_z_err.copy()
-    G_z_err[mask] = Y_z - np.dot(X_z,G_z[mask])
-    G_rho_err[mask] = Y_rho - np.dot(X_rho,G_rho[mask])
+    G_z_err[mask] = (Y_z - np.dot(X_z,G_z[mask]))**2
+    G_rho_err[mask] = (Y_rho - np.dot(X_rho,G_rho[mask]))**2
     
     #calculate mean position in each bin
     binmean_rho[~mask] = np.nan
