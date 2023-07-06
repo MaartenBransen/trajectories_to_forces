@@ -5,6 +5,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 from itertools import tee,islice,repeat
 import numba as nb
+from warnings import warn
 
 #%% private definitions
 
@@ -161,6 +162,18 @@ def _calculate_accelerations_periodic(x0,x1,x2,xmin,xmax):
     elif x2-x1 < -(xmax-xmin)/2:
         modifier += (xmax-xmin)
     return x0 - 2*x1 + x2 + modifier
+
+@nb.njit()
+def _calculate_force_overdamped_simple(coords0,coords1,boundary,
+                                       periodic_boundary,dt,gamma):
+    """optimized force calculation with constant particles"""
+    forces = coords1-coords0
+    if periodic_boundary:
+        bb = boundary[:,1]-boundary[:,0]
+        for d in range(len(boundary)):
+            forces[forces[:,d]>bb[d]/2,d] -= bb[d]
+            forces[forces[:,d]<-bb[d]/2,d] += bb[d]
+    return forces*gamma/dt
 
 def _calculate_forces_overdamped(coords0,coords1,dt,boundary,pos_cols,gamma=1,
                                  periodic_boundary=False):
@@ -1161,11 +1174,12 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     else:
         return G,G_err,counts
     
-def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
-                   pos_cols=('z','y','x'),eval_particles=None,
-                   periodic_boundary=False,basis_function='constant',
-                   bruteforce=False,remove_near_boundary=True,
-                   solve_per_dim=False,neighbour_upper_bound=None):
+def run_overdamped(
+        coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
+        pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
+        basis_function='constant',bruteforce=False,remove_near_boundary=True,
+        constant_particles=False,solve_per_dim=False,neighbour_upper_bound=None
+    ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
@@ -1230,6 +1244,10 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
         box of coordinates, and to prevent erroneous handling of particles
         which interact with other particles outside the measurement volume.
         Only possible when periodic_boundary=False. The default is True.
+    constant_particles : bool, optional
+        when the same set of particles is present in each timestep, i.e. the 
+        indices of coordinates are identical for all time steps after selecting
+        `eval_particles`, more efficient (indexing) algorithms can be used
     solve_per_dim : bool, optional
         if True, the matrix is solved for each dimension separately, and a 
         force vector and error are returned for each dimension.
@@ -1263,6 +1281,12 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     if periodic_boundary and boundary is None:
         raise ValueError('when periodic_boundary=True, boundary must be '
                              'given')
+        
+    if remove_near_boundary and constant_particles:
+        warn('`constant_particles` is not compatible with '
+             '`remove_near_boundary`, falling back to standard implementation',
+             stacklevel=2)
+        constant_particles = False
     
     #check the inputs
     pos_cols = list(pos_cols)
@@ -1339,27 +1363,41 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
                     raise ValueError('when periodic_boundary=True, rmax '
                         'cannot be more than half the smallest box dimension')
                 
-                #remove any items outside of boundaries
-                mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
-                    (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
-                if mask.any():
-                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'
-                          ' some coordinates are outside of boundary and will'
-                          ' be removed')
-                    coords0 = coords0.loc[~mask]
+            #remove any items outside of boundaries
+            mask = (coords0[pos_cols] <= bound0[:,0]).any(axis=1) | \
+                (coords0[pos_cols] > bound0[:,1]).any(axis=1)
+            if mask.any():
+                warn('\ntrajectories_to_forces.run_overdamped: some '
+                     'coordinates are outside of boundary and will be '
+                     'removed')
+                coords0 = coords0.loc[~mask]
                         
     
             #calculate the force vector containin the total force acting on 
             #each particle
-            f = _calculate_forces_overdamped(
-                coords0.loc[sorted(selected)],
-                coords1,
-                t1-t0,
-                bound0,
-                pos_cols,
-                gamma=gamma,
-                periodic_boundary=periodic_boundary,
-            ).sort_index()
+            if constant_particles:
+                f = _calculate_force_overdamped_simple(
+                    coords0[pos_cols].to_numpy(),
+                    coords1[pos_cols].to_numpy(),
+                    bound0,
+                    periodic_boundary,
+                    t1-t0,
+                    gamma
+                ).reshape((-1,))
+            
+            else:
+                f = _calculate_forces_overdamped(
+                    coords0.loc[sorted(selected)],
+                    coords1,
+                    t1-t0,
+                    bound0,
+                    pos_cols,
+                    gamma=gamma,
+                    periodic_boundary=periodic_boundary,
+                ).sort_index()
+                
+                #reshape f to 3n vector and add to total vector
+                f = f[pos_cols].to_numpy().reshape((-1,))
             
             #reshape f to 3n vector and add to total vector
             f = f[pos_cols].to_numpy().ravel()
@@ -1716,7 +1754,7 @@ def _coefficient_loop_cylindrical(
     """loop over all pairs found by KDTree.query and calculate coefficients"""
     #allocate memory for coefficient matrix
     coefficients = np.zeros((3*len(queryparticles),M))
-    counter = np.zeros(M)
+    counter = np.zeros(M,np.uint64)
     binmean_rho = np.zeros(M)
     binmean_z = np.zeros(M)
     imax,jmax = indices.shape
@@ -1745,11 +1783,11 @@ def _coefficient_loop_cylindrical_linear(
     ):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
-    #allocate memory for coefficient matrix,add extra row and col above rmax
-    coefficients = np.zeros((3*len(queryparticles),M+M_rho+M_z+1))
-    counter = np.zeros(M+M_rho+M_z+1)
-    binmean_z = np.zeros(M+M_rho+M_z+1)
-    binmean_rho = np.zeros(M+M_rho+M_z+1)
+    #allocate memory for coefficient matrix, note that M=(M_z+1)(M_rho+1)
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_z = np.zeros(M)
+    binmean_rho = np.zeros(M)
     imax,jmax = indices.shape
     
     #loop over pairs in distance/indices array
@@ -1784,11 +1822,6 @@ def _coefficient_loop_cylindrical_linear(
                     coefficients[3*i+1,bins[k]] += phi[k]*d_zyx[1]/d_rho#y
                     coefficients[3*i+2,bins[k]] += phi[k]*d_zyx[2]/d_rho#x
     
-    coefficients = coefficients.reshape((3*len(queryparticles),M_z+1,M_rho+1))[:,:-1,:-1].reshape(3*len(queryparticles),M)
-    counter = counter.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
-    binmean_z = binmean_z.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
-    binmean_rho = binmean_rho.reshape((M_z+1,M_rho+1))[:-1,:-1].reshape(M)
-    
     return coefficients,counter,binmean_z,binmean_rho
 
 @nb.njit(parallel=False)
@@ -1800,7 +1833,7 @@ def _coefficient_loop_cylindrical_periodic(
     periodic boundary conditions"""
     #allocate memory for coefficient matrix
     coefficients = np.zeros((3*len(queryparticles),M))
-    counter = np.zeros(M)
+    counter = np.zeros(M,np.uint64)
     binmean_z = np.zeros(M)
     binmean_rho = np.zeros(M)
     imax,jmax = indices.shape
@@ -1831,11 +1864,11 @@ def _coefficient_loop_cylindrical_periodic_linear(
     ):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
-    #allocate memory for coefficient matrix,add extra row and col above rmax
-    coefficients = np.zeros((3*len(queryparticles),M+M_rho+M_z+1))
-    counter = np.zeros(M+M_rho+M_z+1)
-    binmean_z = np.zeros(M+M_rho+M_z+1)
-    binmean_rho = np.zeros(M+M_rho+M_z+1)
+    #allocate memory for coefficient matrix, note that M=(M_z+1)(M_rho+1)
+    coefficients = np.zeros((3*len(queryparticles),M))
+    counter = np.zeros(M)
+    binmean_z = np.zeros(M)
+    binmean_rho = np.zeros(M)
     imax,jmax = indices.shape
     
     #loop over pairs in distance/indices array
@@ -1873,8 +1906,6 @@ def _coefficient_loop_cylindrical_periodic_linear(
                     coefficients[3*i+1,bins[k]] += phi[k]*d_zyx[1]/d_rho#y
                     coefficients[3*i+2,bins[k]] += phi[k]*d_zyx[2]/d_rho#x
     
-    #remove additional row and col
-    #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
     return coefficients,counter,binmean_z,binmean_rho
 
 def _calculate_coefficients_cylindrical(
@@ -1935,11 +1966,11 @@ def _calculate_coefficients_cylindrical(
                     particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
                     boxmin,boxmax
                 )
-            mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
-            coefficients = coefficients[:,mask]
-            counter = counter[mask]
-            binmean_z = binmean_z[mask]
-            binmean_rho = binmean_rho[mask]
+            #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
+            #coefficients = coefficients[:,mask]
+            #counter = counter[mask]
+            #binmean_z = binmean_z[mask]
+            #binmean_rho = binmean_rho[mask]
     
     #no periodic boundary conditions
     else:
@@ -1967,10 +1998,11 @@ def _calculate_coefficients_cylindrical(
                 _coefficient_loop_cylindrical_linear(
                     particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
                 )
-            coefficients = coefficients[:,mask]
-            counter = counter[mask]
-            binmean_z = binmean_z[mask]
-            binmean_rho = binmean_rho[mask]
+            #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
+            #coefficients = coefficients[:,mask]
+            #counter = counter[mask]
+            #binmean_z = binmean_z[mask]
+            #binmean_rho = binmean_rho[mask]
                 
     return coefficients,counter,binmean_z,binmean_rho
 
@@ -1978,7 +2010,7 @@ def run_overdamped_cylindrical(
         coordinates,times,boundary=None,gamma=1,rmax=1,M_z=20,M_rho=20,
         pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
         basis_function='constant',remove_near_boundary=True,
-        neighbour_upper_bound=None
+        constant_particles=False,neighbour_upper_bound=None
     ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like) in a 
@@ -2042,6 +2074,10 @@ def run_overdamped_cylindrical(
         box of coordinates, and to prevent erroneous handling of particles
         which interact with other particles outside the measurement volume.
         Only possible when periodic_boundary=False. The default is True.
+    constant_particles : bool, optional
+        when the same set of particles is present in each timestep, i.e. the 
+        indices of coordinates are identical for all time steps after selecting
+        `eval_particles`, more efficient (indexing) algorithms can be used
     neighbour_upper_bound : int
         upper bound on the number of neighbours within rmax a particle may have
         to limit memory use and computing time in the pair finding step. The
@@ -2082,6 +2118,11 @@ def run_overdamped_cylindrical(
     if periodic_boundary and boundary is None:
         raise ValueError('when periodic_boundary=True, boundary must be '
                              'given')
+    if remove_near_boundary and constant_particles:
+        warn('`constant_particles` is not compatible with '
+             '`remove_near_boundary`, falling back to standard implementation',
+             stacklevel=2)
+        constant_particles = False
     
     #get dimensionality from pos_cols, must be 3D for cylindrical
     pos_cols = list(pos_cols)
@@ -2095,8 +2136,13 @@ def run_overdamped_cylindrical(
         _check_inputs(coordinates, times, boundary, pos_cols, eval_particles)
     nsteps = len(times)
         
+    #for linear basis functions, need extra point at the right side of last bin
+    if basis_function == 'linear':
+        M = (M_rho+1)*(M_z+1)
+    else:
+        M = M_rho*M_z
+        
     #initialize matrices for least squares solving
-    M = M_rho*M_z
     X_z,X_rho = np.zeros((M,M)),np.zeros((M,M)) #C dot C.T
     Y_z,Y_rho = np.zeros((M)),np.zeros((M)) #C.T dot f
     counts = np.zeros((M))
@@ -2135,6 +2181,21 @@ def run_overdamped_cylindrical(
             #assure boundary is array
             bound0 = np.array(bound0)
             
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '
+                        'cannot be more than half the smallest box dimension')
+
+            #remove any items outside of boundaries
+            mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
+                (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
+            if mask.any():
+                warn('\ntrajectories_to_forces.run_overdamped: some '
+                     'coordinates are outside of boundary and will be '
+                     'removed',stacklevel=2)
+                coords0 = coords0.loc[~mask]
+            
             #find the particles which are far enough from boundary
             if remove_near_boundary:
                 if rmax > min(bound0[:,1]-bound0[:,0])/2:
@@ -2154,37 +2215,33 @@ def run_overdamped_cylindrical(
             
             if not eval_parts is None:
                 selected = selected.intersection(eval_parts)
-            
-            #check inputs
-            if periodic_boundary:
-                if rmax > min(bound0[:,1]-bound0[:,0])/2:
-                    raise ValueError('when periodic_boundary=True, rmax '
-                        'cannot be more than half the smallest box dimension')
-                
-                #remove any items outside of boundaries
-                mask = (coords0[pos_cols] < bound0[:,0]).any(axis=1) | \
-                    (coords0[pos_cols] >= bound0[:,1]).any(axis=1)
-                if mask.any():
-                    print('\n[WARNING] trajectories_to_forces.run_overdamped:'
-                          ' some coordinates are outside of boundary and will'
-                          ' be removed')
-                    coords0 = coords0.loc[~mask]
-                        
     
             #calculate the force vector containin the total force acting on 
             #each particle
-            f = _calculate_forces_overdamped(
-                coords0.loc[sorted(selected)],
-                coords1,
-                t1-t0,
-                bound0,
-                pos_cols,
-                gamma=gamma,
-                periodic_boundary=periodic_boundary,
-            ).sort_index()
+            if constant_particles:
+                f = _calculate_force_overdamped_simple(
+                    coords0[pos_cols].to_numpy(),
+                    coords1[pos_cols].to_numpy(),
+                    bound0,
+                    periodic_boundary,
+                    t1-t0,
+                    gamma
+                ).reshape((-1,))
             
-            #reshape f to 3n vector and add to total vector
-            f = f[pos_cols].to_numpy().ravel()
+            else:
+                f = _calculate_forces_overdamped(
+                    coords0.loc[sorted(selected)],
+                    coords1,
+                    t1-t0,
+                    bound0,
+                    pos_cols,
+                    gamma=gamma,
+                    periodic_boundary=periodic_boundary,
+                ).sort_index()
+                
+                #reshape f to 3n vector and add to total vector
+                f = f[pos_cols].to_numpy().reshape((-1,))
+            
     
             #find neighbours and coefficients at time t0 for all particles 
             #present in t0 and t1
@@ -2206,10 +2263,11 @@ def run_overdamped_cylindrical(
 
             #precalculate dot products per force dimension
             mask = np.arange(len(f)) %3 == 0#true for z dim, false for y and x
-            X_z += np.dot(C[mask].T,C[mask])
-            Y_z += np.dot(C[mask].T,f[mask])
-            X_rho += np.dot(C[~mask].T,C[~mask])
-            Y_rho += np.dot(C[~mask].T,f[~mask])
+            X_z += np.dot(C[mask].T, C[mask])
+            Y_z += np.dot(C[mask].T, f[mask])
+            mask = ~mask
+            X_rho += np.dot(C[~mask].T, C[~mask])
+            Y_rho += np.dot(C[~mask].T, f[~mask])
             
             #update counter and mean bin positions
             counts += c
@@ -2253,6 +2311,9 @@ def run_overdamped_cylindrical(
     binmean_z /= counts
     
     #provide bin indices and reshape for convenience
+    if basis_function == 'linear':
+        M_z += 1
+        M_rho += 1
     m_rho,m_z = np.meshgrid(range(M_rho),range(M_z))
     G_z.shape = (M_z,M_rho)
     G_rho.shape = (M_z,M_rho)
