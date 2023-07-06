@@ -2266,8 +2266,8 @@ def run_overdamped_cylindrical(
             X_z += np.dot(C[mask].T, C[mask])
             Y_z += np.dot(C[mask].T, f[mask])
             mask = ~mask
-            X_rho += np.dot(C[~mask].T, C[~mask])
-            Y_rho += np.dot(C[~mask].T, f[~mask])
+            X_rho += np.dot(C[mask].T, C[mask])
+            Y_rho += np.dot(C[mask].T, f[mask])
             
             #update counter and mean bin positions
             counts += c
