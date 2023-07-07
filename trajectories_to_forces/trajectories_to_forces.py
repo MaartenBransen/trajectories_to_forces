@@ -1966,11 +1966,6 @@ def _calculate_coefficients_cylindrical(
                     particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
                     boxmin,boxmax
                 )
-            #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
-            #coefficients = coefficients[:,mask]
-            #counter = counter[mask]
-            #binmean_z = binmean_z[mask]
-            #binmean_rho = binmean_rho[mask]
     
     #no periodic boundary conditions
     else:
@@ -1998,11 +1993,6 @@ def _calculate_coefficients_cylindrical(
                 _coefficient_loop_cylindrical_linear(
                     particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
                 )
-            #mask = [(M_rho+1)*m_z+m_rho for m_z in range(M_z) for m_rho in range(M_rho)]
-            #coefficients = coefficients[:,mask]
-            #counter = counter[mask]
-            #binmean_z = binmean_z[mask]
-            #binmean_rho = binmean_rho[mask]
                 
     return coefficients,counter,binmean_z,binmean_rho
 
