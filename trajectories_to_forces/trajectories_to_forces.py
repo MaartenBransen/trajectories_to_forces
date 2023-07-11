@@ -145,7 +145,7 @@ def _calculate_displacement_periodic(x0,x1,xmin,xmax):
     """calulate displacement under periodic boundary conditions in 1D"""
     if x1-x0 > (xmax-xmin)/2:
         return x1-x0-(xmax-xmin)
-    elif x1-x0 < -(xmax-xmin)/2:
+    elif x1-x0 <= -(xmax-xmin)/2:
         return x1-x0+(xmax-xmin)
     else:
         return x1-x0
@@ -168,11 +168,15 @@ def _calculate_force_overdamped_simple(coords0,coords1,boundary,
                                        periodic_boundary,dt,gamma):
     """optimized force calculation with constant particles"""
     forces = coords1-coords0
+    dims = len(boundary)
     if periodic_boundary:
         bb = boundary[:,1]-boundary[:,0]
-        for d in range(len(boundary)):
-            forces[forces[:,d]>bb[d]/2,d] -= bb[d]
-            forces[forces[:,d]<-bb[d]/2,d] += bb[d]
+        for i in range(len(forces)):
+            for d in range(dims):
+                if forces[i,d]>bb[d]/2:
+                    forces[i,d] -= bb[d]
+                elif forces[i,d]<=-bb[d]/2:
+                    forces[i,d] += bb[d]
     return forces*gamma/dt
 
 def _calculate_forces_overdamped(coords0,coords1,dt,boundary,gamma=1,
@@ -393,12 +397,12 @@ def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
     boxmin, boxmax along each dimension"""
     distances = np.empty(len(ci))
     for dim,(i,j,mi,ma) in enumerate(zip(ci,cj,boxmin,boxmax)):
-        if i-j > (ma-mi)/2:
-            distances[dim] = i-j-ma+mi
-        elif i-j <= (mi-ma)/2:
-            distances[dim] = i-j+ma-mi
+        if j-i > (ma-mi)/2:
+            distances[dim] = j-i-ma+mi
+        elif j-i <= (mi-ma)/2:
+            distances[dim] = j-i+ma-mi
         else:
-            distances[dim] = i-j
+            distances[dim] = j-i
     return distances
 
 @nb.njit(parallel=False)
