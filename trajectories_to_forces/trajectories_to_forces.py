@@ -652,15 +652,9 @@ def _calculate_coefficients(coords,query_indices,rmax,M,boundary,pos_cols,
 
 
 #%% public definitions
-
 def save_forceprofile(
-        filename,
-        rmeans,
-        forces,
-        counts,
-        rsteps,
-        rmax,
-        gamma
+        filename, rmax, M, basis_function, gamma, periodic_boundary, binmean_r,
+        G, G_err, counts
     ):
     """
     Saves the results to a text file
@@ -669,28 +663,123 @@ def save_forceprofile(
     ----------
     filename : string
         filename to use for results file
-    rmeans : list of float
+    binmean_r : list of float
         mean value of all pairs in each bin, i.e. a 'count weighted' bin center
     forces : list of float
         list of force values as obtained from the trajectory analysis
     counts : list of int
         the number of evaluations used for each bin
-    rsteps : int
+    M : int
         number of bins
     rmax : float
         cut-off radius for force
     gamma : float
         the friction coefficient used in the calculation
+    """
+    header =  f'rmax {rmax}\n'
+    header += f'M {M}\n'
+    header += f'basis_function {basis_function}\n'
+    header += f'gamma {gamma}'
+    header += f'periodic {periodic_boundary}\n'
+    
+    m = range(M)
+
+    np.savetxt(
+        filename,
+        np.array([m,G,G_err,binmean_r,counts]).T,
+        header=header+'\nm G G_err binmean_r counts',
+        fmt = ['%03d','% .7e','% .7e','% .7e','% .7e']
+    )
+    
+def load_forceprofile(filename):
+    """
+    load results file as stored by `save_forceprofile_cylindrical`
+
+    Parameters
+    ----------
+    filename : str
+        filename with extension to store data in
 
     Returns
     -------
-    None.
+    m : np.ndarray of int
+        bin indices
+    r_cent : np.ndarray of float
+        center r position of each bin.
+    G : np.ndarray of float
+        force coefficients.
+    G_err : np.ndarray of float
+        residual error in G.
+    binmean_r : np.ndarray of float
+        count weighted mean distance for all pairs in each bin.
+    counts : np.ndarray of int or float
+        number of pair counts in each bin weighted for the basis functions.
+    M : int
+        number of discretisation steps
+    rmax : float
+        cut-off distance for the force.
+    basis_function : str
+        type of basis functions used.
+    gamma : float
+        friction factor used for the calculations.
+    periodic_boundary : bool
+        whether periodic boundary conditions were used.
+    """
+    #read header
+    with open(filename,'r') as f:
+        rmax = float(f.readline().split()[-1])
+        M = int(f.readline().split()[-1])
+        bf = f.readline().split()[-1]
+        gamma = float(f.readline().split()[-1])
+        pb = bool(f.readline().split()[-1])
+    
+    d_r = rmax/M
+    
+    #read data
+    m, G, G_err, r_mean, counts = np.loadtxt(filename,unpack=True)
+    
+    m = m.astype(int)
 
+    #bin cent values
+    r_cent = np.arange(0,rmax,d_r)+0.5*d_r,
+
+    return m, r_cent, G, G_err, r_mean, counts, M, rmax, bf, gamma, pb
+
+def save_forceprofile_legacy(
+        filename,
+        binmean_r,
+        forces,
+        counts,
+        M,
+        rmax,
+        gamma
+    ):
+    """
+    !DEPRECATED!
+    
+    Saves the results to a text file in the __version__ <= 0.2.0 format
+
+    Parameters
+    ----------
+    filename : string
+        filename to use for results file
+    binmean_r : list of float
+        mean value of all pairs in each bin, i.e. a 'count weighted' bin center
+    forces : list of float
+        list of force values as obtained from the trajectory analysis
+    counts : list of int
+        the number of evaluations used for each bin
+    M : int
+        number of bins
+    rmax : float
+        cut-off radius for force
+    gamma : float
+        the friction coefficient used in the calculation
     """
     with open(filename,'w+') as file:
         #write input parameters
         file.write("gamma:\t{:.5f}\n".format(gamma))
-        file.write("rsteps:\t{}\n".format(rsteps))
+        file.write("M:\t{}\n".format(M))
         file.write("rmax:\t{}\n".format(rmax))
         file.write('\n')
 
@@ -698,14 +787,14 @@ def save_forceprofile(
         file.write('r\tforce\tcounts\n')
 
         #write table
-        for r,f,c in zip(rmeans,forces,counts):
+        for r,f,c in zip(binmean_r,forces,counts):
             file.write(f'{r:.3f}\t{f: 5f}\t{int(c):d}\n')
 
     print('saved results as "'+filename+'"')
 
-def load_forceprofile(filename):
+def load_forceprofile_legacy(filename):
     """
-    loads the results from a text file
+    loads the results from a text file in the __version__ <= 0.2.0 format
 
     Parameters
     ----------
@@ -714,13 +803,13 @@ def load_forceprofile(filename):
 
     Returns
     -------
-    rmeans : list of float
+    binmean_r : list of float
         count-weighted mean r value of all pairs contributing to the bin
     forces : list
         the mean force in each bin
     counts : list
         the number of particle pairs counted for each bin
-    rsteps : int
+    M : int
         number of discretization steps
     rmax : float
         cut-off radius for force
@@ -738,21 +827,207 @@ def load_forceprofile(filename):
         s=1
     else:
         gamma = None
-    rsteps = int(filedata[0+s].split()[1])
+    M = int(filedata[0+s].split()[1])
     rmax = float(filedata[1+s].split()[1])
 
     #load data table
-    rmeans = []
+    binmean_r = []
     forces = []
     counts = []
 
     for line in filedata[4+s:]:
         line = line.split()
-        rmeans.append(float(line[0]))
+        binmean_r.append(float(line[0]))
         forces.append(float(line[1]))
         counts.append(int(line[2]))
 
-    return rmeans,forces,counts,rsteps,rmax,gamma
+    return binmean_r,forces,counts,M,rmax,gamma
+
+def save_forceprofile_cylindrical(
+        filename,rmax,M_z,M_rho,basis_function,gamma,periodic_boundary,
+        m_z,m_rho,G_z,G_rho,G_z_err,G_rho_err,binmean_z,binmean_rho,counts
+    ):
+    """
+    save results from cylindrical trajectory analysis to a file
+
+    Parameters
+    ----------
+    filename : str
+        filename with extension to store data in.
+    rmax : float
+        cut-off distance for the force.
+    M_z : int
+        number of discretisation steps along the z axis
+    M_rho : int
+        number of discretisation steps along the rho axis.
+    basis_function : str
+        type of basis functions used.
+    gamma : float
+        friction factor used for the calculations.
+    periodic_boundary : bool
+        whether periodic boundary conditions were used.
+    m_z : np.ndarray of int
+        z bin indices
+    m_rho : np.ndarray of int
+        rho bin indices.
+    G_z : np.ndarray of float
+        force coefficients along z.
+    G_rho : np.ndarray of float
+        force coefficients along rho.
+    G_z_err : np.ndarray of float
+        residual error in G_z.
+    G_rho_err : np.ndarray of float
+        residual error in G_rho.
+    binmean_z : np.ndarray of float
+        count weighted mean z distance for all pairs in each bin.
+    binmean_rho : np.ndarray of float
+        count weighted mean rho distance for all pairs in each bin.
+    counts : np.ndarray of int or float
+        number of pair counts in each bin weighted for the basis functions.
+
+    """
+    header =  f'rmax {rmax}\n'
+    header += f'M_z {M_z}\n'
+    header += f'M_rho {M_rho}\n'
+    header += f'basis_function {basis_function}\n'
+    header += f'gamma {gamma}'
+    header += f'periodic {periodic_boundary}\n'
+    
+    data = [a.flatten() for a in \
+            [m_z,m_rho,G_z,G_rho,G_z_err,G_rho_err,binmean_z,binmean_rho,counts]]
+    
+    np.savetxt(
+        filename,
+        np.array(data).T,
+        header=header+'\nm_z m_rho G_z G_rho G_z_err G_rho_err binmean_z binmean_rho counts',
+        fmt = ['%03d','%03d','% .7e','% .7e','% .7e','% .7e','% .7e','% .7e','%.7e']
+    )
+
+def load_forceprofile_cylindrical(filename):
+    """
+    load results file as stored by `save_forceprofile_cylindrical`
+
+    Parameters
+    ----------
+    filename : str
+        filename with extension to store data in
+
+    Returns
+    -------
+    m_z : np.ndarray of int
+        z bin indices
+    m_rho : np.ndarray of int
+        rho bin indices.
+    z_cent : np.ndarray of float
+        z position of center of each bin.
+    rho_cent : np.ndarray of float
+        rho position of center of each bin.
+    G_z : np.ndarray of float
+        force coefficients along z.
+    G_rho : np.ndarray of float
+        force coefficients along rho.
+    G_z_err : np.ndarray of float
+        residual error in G_z.
+    G_rho_err : np.ndarray of float
+        residual error in G_rho.
+    binmean_z : np.ndarray of float
+        count weighted mean z distance for all pairs in each bin.
+    binmean_rho : np.ndarray of float
+        count weighted mean rho distance for all pairs in each bin.
+    counts : np.ndarray of int or float
+        number of pair counts in each bin weighted for the basis functions.
+    M_z : int
+        number of discretisation steps along the z axis
+    M_rho : int
+        number of discretisation steps along the rho axis.
+    rmax : float
+        cut-off distance for the force.
+    basis_function : str
+        type of basis functions used.
+    gamma : float
+        friction factor used for the calculations.
+    periodic_boundary : bool
+        whether periodic boundary conditions were used.
+    """
+    #read header
+    with open(filename,'r') as f:
+        rmax = float(f.readline().split()[-1])
+        M_z = int(f.readline().split()[-1])
+        M_rho = int(f.readline().split()[-1])
+        bf = f.readline().split()[-1]
+        gamma = float(f.readline().split()[-1])
+        pb = bool(f.readline().split()[-1])
+    
+    d_z = rmax/M_z
+    d_rho = rmax/M_rho
+    
+    #read data
+    m_z, m_rho, G_z, G_rho, G_z_err, G_rho_err, z_mean, rho_mean, counts \
+        = np.loadtxt(filename,unpack=True)
+    
+    #typecast and reshape
+    if bf=='linear':
+        shape = (M_z+1,M_rho+1)
+    else:
+        shape = (M_z,M_rho)
+    m_z = m_z.astype(int).reshape(shape)
+    m_rho = m_rho.astype(int).reshape(shape)
+    G_z.shape = shape
+    G_rho.shape = shape
+    G_z_err.shape = shape
+    G_rho_err.shape = shape
+    z_mean.shape = shape
+    rho_mean.shape = shape
+    counts.shape = shape
+    
+    #bin cent values
+    rho_cent,z_cent = np.meshgrid(
+        np.arange(0,rmax,d_rho)+0.5*d_z,
+        np.arange(0,rmax,d_z)+0.5*d_rho
+    )
+
+    return m_z, m_rho, z_cent, rho_cent, G_z, G_rho, G_z_err, G_rho_err, \
+        z_mean, rho_mean, counts, M_z, M_rho, rmax, bf, gamma, pb
+
+def convert_cylindrical_force_axes(binmean_z,binmean_rho,G_z,G_rho,):
+    """
+    convert the force coefficients along rho and z axes to the absolute value
+    and force as well as the coefficient values parallel and perpendicular to
+    the particle-particle vector.
+
+    Parameters
+    ----------
+    binmean_z : np.ndarray of float
+        count weighted mean z distance for all pairs in each bin.
+    binmean_rho : np.ndarray of float
+        count weighted mean rho distance for all pairs in each bin.
+    G_z : np.ndarray of float
+        force coefficients along z.
+    G_rho : np.ndarray of float
+        force coefficients along rho.
+
+    Returns
+    -------
+    G_abs : np.ndarray of float
+        absolute value of the force coefficients, i.e. net force scalar.
+    G_ang : np.ndarray of float
+        (clockwise) angle of the force vector w.r.t. the z axis in radians.
+    G_para : np.ndarray of float
+        force coefficients for the force parallel to the particle-particle 
+        vector.
+    G_perp : np.ndarray of float
+        force coefficients for the force perpendicular to the particle-particle 
+        vector.
+
+    """
+    G_abs = np.sqrt(G_z**2+G_rho**2)
+    binmean_r = np.sqrt(binmean_z**2+binmean_rho**2)
+    binmean_ang = np.arccos(binmean_z/binmean_r)
+    G_ang = np.sign(G_rho)*np.arccos(G_z/G_abs)
+    G_para = G_abs*np.cos(G_ang-binmean_ang)
+    G_perp = G_abs*np.sin(G_ang-binmean_ang)
+    return G_abs,G_ang,G_para,G_perp
+
 
 def filter_msd(coordinates, times=None, pos_cols=('z','y','x'),
                       msd_min=0.01, msd_max=1, interval=1):
@@ -1182,7 +1457,8 @@ def run_overdamped(
         coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
         pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
         basis_function='constant',bruteforce=False,remove_near_boundary=True,
-        constant_particles=False,solve_per_dim=False,neighbour_upper_bound=None
+        constant_particles=False,solve_per_dim=False,
+        neighbour_upper_bound=None,newline=False
     ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
@@ -1333,16 +1609,32 @@ def run_overdamped(
             if nested:
                 print(('\revaluating set {:d} of {:d}, step {:d} of {:d} '
                        '(time: {:.5f} to {:.5f})').format(i+1,nsteps,j+1,nt-1,
-                                                    t0,t1),end='',flush=True)
+                                                    t0,t1),end='')
             else:
                 print(('\revaluating step {:d} of {:d} (time: {:.5f} to '
-                       '{:.5f})').format(j+1,nt-1,t0,t1),end='',flush=True)
+                       '{:.5f})').format(j+1,nt-1,t0,t1),end='')
             
             #assure boundary is array, coords are only pos_cols
             bound0 = np.array(bound0)
             if not pos_cols is None:
                 coords0 = coords0[pos_cols]
                 coords1 = coords1[pos_cols]
+            
+            #check inputs
+            if periodic_boundary:
+                if rmax > min(bound0[:,1]-bound0[:,0])/2:
+                    raise ValueError('when periodic_boundary=True, rmax '
+                        'cannot be more than half the smallest box dimension')
+                
+            #remove any items outside of boundaries
+            mask = (coords0 <= bound0[:,0]).any(axis=1) | \
+                (coords0 > bound0[:,1]).any(axis=1)
+            if mask.any():
+                print()
+                warn('trajectories_to_forces.run_overdamped: some '
+                     'coordinates are outside of boundary and will be '
+                     f'removed from series {i} set {j}')
+                coords0 = coords0.loc[~mask]
             
             #find the particles which are far enough from boundary
             if remove_near_boundary:
@@ -1362,23 +1654,7 @@ def run_overdamped(
                 selected = set(coords0.index)
             
             if not eval_parts is None:
-                selected = selected.intersection(eval_parts)
-            
-            #check inputs
-            if periodic_boundary:
-                if rmax > min(bound0[:,1]-bound0[:,0])/2:
-                    raise ValueError('when periodic_boundary=True, rmax '
-                        'cannot be more than half the smallest box dimension')
-                
-            #remove any items outside of boundaries
-            mask = (coords0 <= bound0[:,0]).any(axis=1) | \
-                (coords0 > bound0[:,1]).any(axis=1)
-            if mask.any():
-                warn('\ntrajectories_to_forces.run_overdamped: some '
-                     'coordinates are outside of boundary and will be '
-                     'removed')
-                coords0 = coords0.loc[~mask]
-                        
+                selected = selected.intersection(eval_parts)       
     
             #calculate the force vector containin the total force acting on 
             #each particle and reshape from (N,3) to (3N,) numpy list
@@ -1433,10 +1709,10 @@ def run_overdamped(
             binmeanpos += bmp
         
         #newline between steps
-        if nested:
+        if nested and newline:
             print()
     
-    if nested:
+    if nested and newline:
         print('solving matrix equation')
     else:
         print('\nsolving matrix equation')
@@ -1778,8 +2054,7 @@ def _coefficient_loop_cylindrical(
 
 @nb.njit(parallel=False)
 def _coefficient_loop_cylindrical_linear(
-        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z,
-        boxmin,boxmax
+        particles,queryparticles,indices,mask,rmax,M,M_rho,M_z
     ):
     """loop over all pairs found by KDTree.query and calculate coefficients in 
     periodic boundary conditions"""
@@ -2000,7 +2275,7 @@ def run_overdamped_cylindrical(
         pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
         basis_function='constant',remove_near_boundary=True,
         constant_particles=False,neighbour_upper_bound=None,use_gpu=False,
-        check_coordinates=True,
+        check_coordinates=True,newline=True,
     ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like) in a 
@@ -2277,10 +2552,10 @@ def run_overdamped_cylindrical(
             binmean_z += bmp_z
         
         #newline between steps
-        if nested:
+        if nested and newline:
             print()
     
-    if nested:
+    if nested and newline:
         print('solving matrix equation')
     else:
         print('\nsolving matrix equation')
@@ -2300,6 +2575,8 @@ def run_overdamped_cylindrical(
         G_z[mask] = cp.dot(cp.linalg.inv(X_z),Y_z).get()
         G_rho[mask] = cp.dot(cp.linalg.inv(X_rho),Y_rho).get()
     else:
+        print(X_rho)
+        print(Y_rho)
         G_z[mask] = np.dot(np.linalg.inv(X_z),Y_z)
         G_rho[mask] = np.dot(np.linalg.inv(X_rho),Y_rho)
     
