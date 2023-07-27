@@ -2575,8 +2575,6 @@ def run_overdamped_cylindrical(
         G_z[mask] = cp.dot(cp.linalg.inv(X_z),Y_z).get()
         G_rho[mask] = cp.dot(cp.linalg.inv(X_rho),Y_rho).get()
     else:
-        print(X_rho)
-        print(Y_rho)
         G_z[mask] = np.dot(np.linalg.inv(X_z),Y_z)
         G_rho[mask] = np.dot(np.linalg.inv(X_rho),Y_rho)
     
