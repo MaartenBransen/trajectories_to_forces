@@ -1681,9 +1681,9 @@ def run_overdamped(
             #find neighbours and coefficients at time t0 for all particles 
             #present in t0 and t1
             C,c,bmp = _calculate_coefficients(
-                coords0.loc[
-                    list(set(coords0.index).intersection(coords1.index))
-                ],
+                coords0 if constant_particles else \
+                    coords0.loc[
+                        list(set(coords0.index).intersection(coords1.index))],
                 set(selected).intersection(coords1.index),
                 rmax,
                 M,
