@@ -392,18 +392,22 @@ def _bruteforce_pair_loop(particles,queryparticles,ndims,rmax,M):
 
 @nb.njit()
 def _distance_periodic_wrap(ci,cj,boxmin,boxmax):
-    """calculates element-wise distances between two sets of n-dimensional 
-    coordinates while wrapping around boundaries of periodic box with bounds
-    boxmin, boxmax along each dimension"""
+    """calculates element-wise distance between two n-dimensional coordinates 
+    while wrapping around boundaries of periodic box with bounds boxmin, boxmax
+    along each dimension"""
     distances = np.empty(len(ci))
+    #note the somewhat weird convention here. Since we define an attractive 
+    #force to be negative and repulsive force positive, we want the distance
+    #from j to i, not i to j
     for dim,(i,j,mi,ma) in enumerate(zip(ci,cj,boxmin,boxmax)):
-        if j-i > (ma-mi)/2:
-            distances[dim] = j-i-ma+mi
-        elif j-i <= (mi-ma)/2:
-            distances[dim] = j-i+ma-mi
+        if i-j > (ma-mi)/2:
+            distances[dim] = i-j-ma+mi
+        elif i-j <= (mi-ma)/2:
+            distances[dim] = i-j+ma-mi
         else:
-            distances[dim] = j-i
+            distances[dim] = i-j
     return distances
+
 
 @nb.njit(parallel=False)
 def _coefficient_loop_periodic(particles,queryparticles,ndims,dist,
