@@ -1462,7 +1462,7 @@ def run_overdamped(
         pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
         basis_function='constant',bruteforce=False,remove_near_boundary=True,
         constant_particles=False,solve_per_dim=False,
-        neighbour_upper_bound=None,newline=False
+        neighbour_upper_bound=None,newline=False,use_gpu=False,
     ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
@@ -1571,6 +1571,8 @@ def run_overdamped(
              '`remove_near_boundary`, falling back to standard implementation',
              stacklevel=2)
         constant_particles = False
+    if use_gpu:
+        import cupy as cp
     
     #check the inputs
     pos_cols = list(pos_cols)
@@ -1581,11 +1583,19 @@ def run_overdamped(
         
     #initialize matrices for least squares solving
     if solve_per_dim:
-        X = [np.zeros((M,M)) for _ in range(ndims)]
-        Y = [np.zeros((M)) for _ in range(ndims)]
+        if use_gpu:
+            X = [np.zeros((M,M)) for _ in range(ndims)]
+            Y = [np.zeros((M)) for _ in range(ndims)]
+        else:
+            X = [cp.zeros((M,M)) for _ in range(ndims)]
+            Y = [cp.zeros((M)) for _ in range(ndims)]
     else:
-        X = np.zeros((M,M)) #C dot C.T
-        Y = np.zeros((M)) #C.T dot f
+        if use_gpu:
+            X = cp.zeros((M,M)) #C dot C.T
+            Y = cp.zeros((M)) #C.T dot f
+        else:
+            X = np.zeros((M,M)) #C dot C.T
+            Y = np.zeros((M)) #C.T dot f
     counts = np.zeros((M))
     binmeanpos = np.zeros((M))
     
@@ -1701,12 +1711,23 @@ def run_overdamped(
             
             #precalculate dot products to avoid having entire matrix in memory
             if solve_per_dim:
-                for dim in range(ndims):
-                    X[dim] += np.dot(C[dim::ndims].T,C[dim::ndims])
-                    Y[dim] += np.dot(C[dim::ndims].T,f[dim::ndims])
+                if use_gpu:
+                    C, f = cp.asarray(C), cp.asarray(f)
+                    for dim in range(ndims):
+                        X[dim] += cp.dot(C[dim::ndims].T,C[dim::ndims])
+                        Y[dim] += cp.dot(C[dim::ndims].T,f[dim::ndims])
+                else:
+                    for dim in range(ndims):
+                        X[dim] += np.dot(C[dim::ndims].T,C[dim::ndims])
+                        Y[dim] += np.dot(C[dim::ndims].T,f[dim::ndims])
             else:
-                X += np.dot(C.T,C)
-                Y += np.dot(C.T,f)
+                if use_gpu:
+                    C, f = cp.asarray(C), cp.asarray(f)
+                    X += cp.dot(C.T,C)
+                    Y += cp.dot(C.T,f)
+                else:
+                    X += np.dot(C.T,C)
+                    Y += np.dot(C.T,f)
             
             #update counter and mean bin positions
             counts += c
@@ -1721,36 +1742,55 @@ def run_overdamped(
     else:
         print('\nsolving matrix equation')
 
-    #solve eq. 15 from the paper in x, y and z separately
+    #mask for zero data
+    mask = counts>0
+
+    #solve eq. 15 from the paper per dim
     if solve_per_dim:
-        G = []
-        G_err = []
+        G, G_err = [], []
         for dim in range(ndims):
-            G_dim,G_dim_err,_,_ = np.linalg.lstsq(X[dim],Y[dim],rcond=None)
-            G_dim[counts==0] = np.nan
+            
+            #remove zero data
+            X[dim] = X[dim][mask][:,mask]
+            Y[dim] = Y[dim][mask]
+            
+            #initialize result and error vectors
+            G_dim, G_dim_err = np.empty(M),np.empty(M)
+            G_dim[~mask] = np.nan
+            G_dim_err[~mask] = np.nan
+            
+            #solve and calculate error
+            if use_gpu:
+                G_dim[mask] = cp.dot(cp.linalg.inv(X[dim]),Y[dim]).get()
+                G_dim_err[mask] = ((Y - cp.dot(X,cp.asarray(G_dim[mask])))**2).get()
+            else:
+                G_dim[mask] = np.dot(np.linalg.inv(X[dim]),Y[dim])
+                G_dim_err[mask] = (Y - np.dot(X,G_dim[mask]))**2
             G.append(G_dim)
             G_err.append(G_dim_err)
-        G,G_err = tuple(G),tuple(G_err)
+        G, G_err = tuple(G), tuple(G_err)
     
     #solve eq. 15 from the paper for all dimensions together
     else:
+        #remove zero data
+        X = X[mask][:,mask]
+        Y = Y[mask]
+        
         #initialize result and error vectors
         G,G_err = np.empty(M),np.empty(M)
-        G[counts==0] = np.nan
-        G_err[counts==0] = np.nan
+        G[~mask] = np.nan
+        G_err[~mask] = np.nan
         
-        #remove bins with zero data
-        X = X[counts>0][:,counts>0]
-        Y = Y[counts>0]
-        
-        #solve for lowest error solution
-        G[counts>0] = np.dot(np.linalg.inv(X),Y)
-        
-        #calculate error
-        G_err[counts>0] = Y - np.dot(X,G[counts>0])
+        #solve for lowest error solution and calculate error
+        if use_gpu:
+            G[mask] = cp.dot(cp.linalg.inv(X),Y).get()
+            G_err[mask] = ((Y - cp.dot(X,cp.asarray(G[mask])))**2).get()
+        else:
+            G[mask] = np.dot(np.linalg.inv(X),Y)
+            G_err[mask] = (Y - np.dot(X,G[mask]))**2
     
     #calculate mean distance in each bin
-    binmeanpos[counts==0] = np.nan
+    binmeanpos[~mask] = np.nan
     binmeanpos /= counts
     
     print('done')
