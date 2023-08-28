@@ -683,7 +683,7 @@ def save_forceprofile(
     header =  f'rmax {rmax}\n'
     header += f'M {M}\n'
     header += f'basis_function {basis_function}\n'
-    header += f'gamma {gamma}'
+    header += f'gamma {gamma}\n'
     header += f'periodic {periodic_boundary}\n'
     
     m = range(M)
