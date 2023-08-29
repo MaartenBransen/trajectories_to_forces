@@ -2495,9 +2495,8 @@ def run_overdamped_cylindrical(
             
             #assure boundary is array, coords are only pos_cols
             bound0 = np.array(bound0)
-            if not pos_cols is None:
-                coords0 = coords0[pos_cols]
-                coords1 = coords1[pos_cols]
+            coords0 = coords0[pos_cols]
+            coords1 = coords1[pos_cols]
             
             #check inputs
             if periodic_boundary:
