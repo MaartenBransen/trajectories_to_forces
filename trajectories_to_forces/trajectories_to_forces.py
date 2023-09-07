@@ -2509,10 +2509,13 @@ def run_overdamped_cylindrical(
                 mask = (coords0 < bound0[:,0]).any(axis=1) | \
                     (coords0 >= bound0[:,1]).any(axis=1)
                 if mask.any():
+                    mask = coords0.index[mask]
                     warn('\ntrajectories_to_forces.run_overdamped: some '
                          'coordinates are outside of boundary and will be '
-                         'removed',stacklevel=2)
-                    coords0 = coords0.loc[~mask]
+                         f'removed: indices {mask.tolist()}',stacklevel=2)
+                    coords0 = coords0.drop(mask)
+                    if constant_particles:
+                        coords1 = coords1.drop(mask,errors='ignore')
             
             #find the particles which are far enough from boundary
             if remove_near_boundary:
