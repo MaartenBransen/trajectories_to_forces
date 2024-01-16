@@ -1493,19 +1493,22 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     Parameters
     ----------
     coordinates : (list of) list of pandas.DataFrame
-        A pandas dataframe containing coordinates for each timestep. Must be
-        indexed by particle (with each particle having a unique identifyer that
-        matches between different time steps) and contain coordinates along 
-        each dimension in a separate column, with column names matching those 
-        given in `pos_cols`.
-    times : list of float
-        list timestamps corresponding to the coordinates
-    boundary : list or tuple, optional
+        A pandas dataframe containing coordinates for each timestep as a series
+        of consecutive timesteps of at least 2 items (i.e. 1 time interval). 
+        Multiple nonconsecutive series may be given as list of lists of 
+        DataFrames. DataFrames must be indexed by particle (with each particle 
+        having a unique identifyer that matches between different time steps) 
+        and contain coordinates along each dimension in a separate column, with
+        column names matching those given in `pos_cols`.
+    times : (list of) list of float
+        list(s) of timestamps corresponding to the coordinate sets
+    boundary : tuple, list of tuple or list of list of tuple, optional
         boundaries of the box in which the coordinates are defined in the form
         ((d0_min,d0_max),(d1_min,d1_max),...) with a length (number) and order 
-        of dimensions matching `pos_cols`. The default is `None`, which uses 
-        the min and max value found in the entire set of coordinates along each
-        axis.
+        of dimensions matching `pos_cols`. A single set of boundaries may be 
+        given for all timesteps, or a (list of) list of boundaries for each 
+        timestep may be specified. The default is `None`, which uses the min 
+        and max value found in the entire set of coordinates along each axis. 
     gamma : float, optional
         damping/friction coefficient (kT/D) for calculation of F=V*kT/D. The
         default is 1.
@@ -2356,20 +2359,23 @@ def run_overdamped_cylindrical(coordinates,times,boundary=None,gamma=1,rmax=1,
 
     Parameters
     ----------
-    coordinates : list of pandas.DataFrame
-        A pandas dataframe containing coordinates for each timestep. Must be
-        indexed by particle (with each particle having a unique identifyer that
-        matches between different time steps) and contain coordinates along 
-        each dimension in a separate column, with column names matching those 
-        given in `pos_cols`.
-    times : list of float
-        list timestamps corresponding to the coordinates
-    boundary : list or tuple, optional
+    coordinates : (list of) list of pandas.DataFrame
+        A pandas dataframe containing coordinates for each timestep as a series
+        of consecutive timesteps of at least 2 items (i.e. 1 time interval). 
+        Multiple nonconsecutive series may be given as list of lists of 
+        DataFrames. DataFrames must be indexed by particle (with each particle 
+        having a unique identifyer that matches between different time steps) 
+        and contain coordinates along each dimension in a separate column, with
+        column names matching those given in `pos_cols`.
+    times : (list of) list of float
+        list(s) of timestamps corresponding to the coordinate sets
+    boundary : tuple, list of tuple or list of list of tuple, optional
         boundaries of the box in which the coordinates are defined in the form
         ((d0_min,d0_max),(d1_min,d1_max),...) with a length (number) and order 
-        of dimensions matching `pos_cols`. The default is `None`, which uses 
-        the min and max value found in the entire set of coordinates along each
-        axis.
+        of dimensions matching `pos_cols`. A single set of boundaries may be 
+        given for all timesteps, or a (list of) list of boundaries for each 
+        timestep may be specified. The default is `None`, which uses the min 
+        and max value found in the entire set of coordinates along each axis. 
     gamma : float, optional
         damping/friction coefficient (kT/D) for calculation of F=V*kT/D. The
         default is 1.
