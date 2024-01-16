@@ -2,10 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name="trajectories_to_forces",
-    version="0.1.0",
+    version="1.0.0",
     author="Maarten Bransen",
-    author_email="m.bransen@uu.nl",
-    license='GNU General Public License v3.0',
+    license='MIT License',
     long_description=open('README.md').read(),
     packages=find_packages(include=["trajectories_to_forces", "trajectories_to_forces.*"]),
     install_requires=[

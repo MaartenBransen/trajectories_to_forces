@@ -1,3 +1,26 @@
+"""
+-------------------------------------------------------------------------------
+Copyright (c) 2024 Maarten Bransen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-------------------------------------------------------------------------------
+"""
 
 #%% imports
 import pandas as pd
@@ -660,8 +683,7 @@ def save_forceprofile(
         filename, rmax, M, basis_function, gamma, periodic_boundary, binmean_r,
         G, G_err, counts
     ):
-    """
-    Saves the results to a text file
+    """Saves the results from trajectory analysis to a text file
 
     Parameters
     ----------
@@ -696,8 +718,7 @@ def save_forceprofile(
     )
     
 def load_forceprofile(filename):
-    """
-    load results file as stored by `save_forceprofile_cylindrical`
+    """load results file as stored by `save_forceprofile`
 
     Parameters
     ----------
@@ -1457,22 +1478,21 @@ def run_overdamped_legacy(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
     else:
         return G,G_err,counts
     
-def run_overdamped(
-        coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
-        pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
-        basis_function='constant',bruteforce=False,remove_near_boundary=True,
-        constant_particles=False,solve_per_dim=False,
-        neighbour_upper_bound=None,newline=False,use_gpu=False,
+def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
+    pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
+    basis_function='constant',bruteforce=False,remove_near_boundary=True,
+    constant_particles=False,solve_per_dim=False,neighbour_upper_bound=None,
+    newline=False,use_gpu=False,
     ):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like), iterates
     over all subsequent sets of two timesteps and obtains forces from the 
     velocity of the particles as a function of the distribution of the
-    particles around eachother.
+    particles around eachother. Based on ref. [1].
 
     Parameters
     ----------
-    coordinates : list of pandas.DataFrame
+    coordinates : (list of) list of pandas.DataFrame
         A pandas dataframe containing coordinates for each timestep. Must be
         indexed by particle (with each particle having a unique identifyer that
         matches between different time steps) and contain coordinates along 
@@ -1535,10 +1555,19 @@ def run_overdamped(
     solve_per_dim : bool, optional
         if True, the matrix is solved for each dimension separately, and a 
         force vector and error are returned for each dimension.
-    neighbour_upper_bound : int
+    neighbour_upper_bound : int, optional
         upper bound on the number of neighbours within rmax a particle may have
         to limit memory use and computing time in the pair finding step. The
         default is the total number of particles in each time step.
+    newline : bool, optional
+        whether to print output for each series on a new line. The default is 
+        True.
+    use_gpu : bool, optional
+        if True, matrix operations for the least squares solver are offloaded 
+        to the gpu via CuPy, which requires a cuda-compatible gpu. For large
+        numbers of bins (>>100) this may result in significantly better 
+        performance but there is considerable overhead in moving data between
+        cpu and gpu, so for most use cases this is not faster.
 
     Returns
     -------
@@ -1804,7 +1833,7 @@ def run_inertial(coordinates,times,boundary=None,mass=1,rmax=1,M=20,
     """
     Run the analysis for inertial dynamics (molecular dynamics like), iterates
     over all subsequent sets of three timesteps and obtains forces from the 
-    accellerations of the particles.
+    accellerations of the particles. Based on [1].
 
     Parameters
     ----------
@@ -2314,13 +2343,12 @@ def _calculate_coefficients_cylindrical(
                 
     return coefficients,counter,binmean_z,binmean_rho
 
-def run_overdamped_cylindrical(
-        coordinates,times,boundary=None,gamma=1,rmax=1,M_z=20,M_rho=20,
-        pos_cols=('z','y','x'),eval_particles=None,periodic_boundary=False,
-        basis_function='constant',remove_near_boundary=True,
-        constant_particles=False,neighbour_upper_bound=None,use_gpu=False,
-        check_coordinates=True,newline=True,
-    ):
+def run_overdamped_cylindrical(coordinates,times,boundary=None,gamma=1,rmax=1,
+        M_z=20,M_rho=20,pos_cols=('z','y','x'),eval_particles=None,
+        periodic_boundary=False,basis_function='constant',
+        remove_near_boundary=True,constant_particles=False,
+        neighbour_upper_bound=None,use_gpu=False,check_coordinates=True,
+        newline=True):
     """
     Run the analysis for overdamped dynamics (brownian dynamics like) in a 
     cylindrical coordinate system where interactions are radially averaged in 
@@ -2391,6 +2419,18 @@ def run_overdamped_cylindrical(
         upper bound on the number of neighbours within rmax a particle may have
         to limit memory use and computing time in the pair finding step. The
         default is the total number of particles in each time step.
+    use_gpu : bool, optional
+        if True, matrix operations for the least squares solver are offloaded 
+        to the gpu via CuPy, which requires a cuda-compatible gpu. For large
+        numbers of bins (M_z×M_rho>>100) this may result in significantly 
+        better performance. There is considerable overhead in moving data 
+        between cpu and gpu, so for small numbers of bins this is not faster.
+    check_coordinates : bool, optional
+        by default, coordinates are checked for being within boundaries. This 
+        can be bypassed by setting this to False.
+    newline : bool, optional
+        whether to print output for each series on a new line. The default is 
+        True.
 
     Returns
     -------
@@ -2421,8 +2461,6 @@ def run_overdamped_cylindrical(
         each bin. When `basis_function='linear'` this is a total weight rather
         than an integer count, since each particle pair has its unity weight
         divided over the 4 surrounding bins.
-        
-        m_z,m_rho,G_z,G_rho,G_z_err,G_rho_err,binmean_z,binmean_rho,counts
     """
     if use_gpu:
         import cupy as cp
