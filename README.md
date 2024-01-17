@@ -1,5 +1,5 @@
 # Trajectories to forces
-
+[![DOI](https://zenodo.org/badge/247725507.svg)](https://zenodo.org/doi/10.5281/zenodo.10521766)
 ## Overview
 This python package provides a set of functions for extracting pairwise interaction forces from particle trajectories under overdamped (Brownian) or inertial (molecular) dynamics. The codes for this package were developed as part of the work in reference [1], based on the concepts in reference [2].
 Detailed descriptions of the theory behind this method and its implementation can be found in reference [1].
