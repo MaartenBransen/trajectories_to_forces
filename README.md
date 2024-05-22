@@ -5,7 +5,7 @@ This python package provides a set of functions for extracting pairwise interact
 Detailed descriptions of the theory behind this method and its implementation can be found in reference [1].
 
 ### References
-[1] Bransen, M. (2024). Measuring interactions between colloidal (nano)particles. PhD thesis, Utrecht University.
+[1] Bransen, M. (2024). [Measuring interactions between colloidal (nano)particles](https://doi.org/10.33540/2252). PhD thesis, Utrecht University.
 
 [2] Jenkins, I. C., Crocker, J. C., & Sinno, T. (2015). [Interaction potentials from arbitrary multi-particle trajectory data](https://doi.org/10.1039/C5SM01233C). Soft Matter, 11(35), 6948–6956. 
 
