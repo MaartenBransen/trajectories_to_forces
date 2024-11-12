@@ -1237,14 +1237,17 @@ def run_overdamped(coordinates,times,boundary=None,gamma=1,rmax=1,M=20,
                         'cannot be more than half the smallest box dimension')
                 
             #remove any items outside of boundaries
-            mask = (coords0 <= bound0[:,0]).any(axis=1) | \
-                (coords0 > bound0[:,1]).any(axis=1)
+            mask = (coords0 < bound0[:,0]).any(axis=1) | \
+                (coords0 >= bound0[:,1]).any(axis=1)
             if mask.any():
-                print()
-                warn('trajectories_to_forces.run_overdamped: some '
+                mask = coords0.index[mask]
+                warn('\ntrajectories_to_forces.run_overdamped: some '
                      'coordinates are outside of boundary and will be '
-                     f'removed from series {i} set {j}')
-                coords0 = coords0.loc[~mask]
+                     f'removed: set {i} step {j} indices {mask.tolist()}',
+                     stacklevel=2)
+                coords0 = coords0.drop(mask)
+                if constant_particles:
+                    coords1 = coords1.drop(mask,errors='ignore')
             
             #find the particles which are far enough from boundary
             if remove_near_boundary:
@@ -2120,7 +2123,8 @@ def run_overdamped_cylindrical(coordinates,times,boundary=None,gamma=1,rmax=1,
                     mask = coords0.index[mask]
                     warn('\ntrajectories_to_forces.run_overdamped: some '
                          'coordinates are outside of boundary and will be '
-                         f'removed: indices {mask.tolist()}',stacklevel=2)
+                         f'removed: set {i} step {j} indices {mask.tolist()}',
+                         stacklevel=2)
                     coords0 = coords0.drop(mask)
                     if constant_particles:
                         coords1 = coords1.drop(mask,errors='ignore')
